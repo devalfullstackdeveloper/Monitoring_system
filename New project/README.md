@@ -1,4 +1,4 @@
-# Org Activity Tracker (Hubstaff-style)
+# Monitoring system
 
 A working employee time & activity tracker: a desktop agent that runs on
 each employee's machine, a backend API, and an admin web dashboard.
