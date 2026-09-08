@@ -1,0 +1,3 @@
+# Only needed on the machine that BUILDS the agent .exe — not on employee
+# machines that just run the finished executable.
+pyinstaller==6.10.0
