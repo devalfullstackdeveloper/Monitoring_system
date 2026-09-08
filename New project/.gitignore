@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+tracker.db
+backend/storage/screenshots/*
+!backend/storage/screenshots/.gitkeep
+desktop-agent/.auth_token
+node_modules/
+frontend/dist/
+.venv*
