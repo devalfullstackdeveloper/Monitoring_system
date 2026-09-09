@@ -67,6 +67,19 @@ if not defined NEED_SETUP (
     if errorlevel 1 set "NEED_SETUP=1"
 )
 
+REM A copied venv can exist on disk but still be unusable here: the Python
+REM executable may be missing, the venv may be stale, or the files may be locked
+REM by an antivirus or a previous failed install. In those cases, rebuild from
+REM scratch instead of trying to keep using the broken environment.
+if not defined NEED_SETUP (
+    "backend\venv\Scripts\python.exe" -c "import sys; print(sys.executable)" >nul 2>nul
+    if errorlevel 1 set "NEED_SETUP=1"
+)
+if not defined NEED_SETUP (
+    "desktop-agent\venv\Scripts\python.exe" -c "import sys; print(sys.executable)" >nul 2>nul
+    if errorlevel 1 set "NEED_SETUP=1"
+)
+
 if defined NEED_SETUP (
     echo First run on this computer - setting up now, this only happens once
     echo and may take a minute or two. Please wait...
@@ -88,15 +101,28 @@ REM without deleting the user's existing environment or configuration.
 echo Checking Python and frontend requirements...
 "backend\venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r "backend\requirements.txt"
 if errorlevel 1 (
-    echo ERROR: failed to install backend requirements.
-    pause
-    exit /b 1
+    echo The backend venv appears stale, broken, or locked by Windows.
+    echo Rebuilding the backend environment from scratch so the project works
+    echo correctly on this machine.
+    rmdir /s /q "backend\venv"
+    call "%~dp0setup.bat" --auto
+    if errorlevel 1 (
+        echo ERROR: failed to rebuild the backend environment.
+        pause
+        exit /b 1
+    )
 )
 "desktop-agent\venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r "desktop-agent\requirements.txt"
 if errorlevel 1 (
-    echo ERROR: failed to install desktop-agent requirements.
-    pause
-    exit /b 1
+    echo The desktop-agent venv appears stale, broken, or locked by Windows.
+    echo Rebuilding the desktop-agent environment from scratch.
+    rmdir /s /q "desktop-agent\venv"
+    call "%~dp0setup.bat" --auto
+    if errorlevel 1 (
+        echo ERROR: failed to rebuild the desktop-agent environment.
+        pause
+        exit /b 1
+    )
 )
 pushd frontend
 call npm install
