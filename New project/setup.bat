@@ -54,8 +54,16 @@ if errorlevel 1 (
 
 echo --- Backend ---
 if exist "backend\venv" (
+    echo Stopping any running Org Tracker processes which may still hold the backend\venv open...
+    call "%~dp0stop-all.bat" >nul 2>nul
     echo Removing existing backend\venv so it's rebuilt fresh for this computer...
     rmdir /s /q "backend\venv"
+    if exist "backend\venv" (
+        echo ERROR: backend\venv is still locked by another process. Close any Python,
+        echo VS Code, or terminal windows using this project and run setup.bat again.
+        if not defined AUTO_MODE pause
+        exit /b 1
+    )
 )
 %PYTHON_CMD% -m venv "backend\venv"
 if errorlevel 1 (
@@ -77,8 +85,16 @@ if not exist "backend\.env" (
 echo.
 echo --- Desktop agent ---
 if exist "desktop-agent\venv" (
+    echo Stopping any running Org Tracker processes which may still hold the desktop-agent\venv open...
+    call "%~dp0stop-all.bat" >nul 2>nul
     echo Removing existing desktop-agent\venv so it's rebuilt fresh for this computer...
     rmdir /s /q "desktop-agent\venv"
+    if exist "desktop-agent\venv" (
+        echo ERROR: desktop-agent\venv is still locked by another process. Close any Python,
+        echo VS Code, or terminal windows using this project and run setup.bat again.
+        if not defined AUTO_MODE pause
+        exit /b 1
+    )
 )
 %PYTHON_CMD% -m venv "desktop-agent\venv"
 if errorlevel 1 (

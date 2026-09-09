@@ -104,7 +104,15 @@ if errorlevel 1 (
     echo The backend venv appears stale, broken, or locked by Windows.
     echo Rebuilding the backend environment from scratch so the project works
     echo correctly on this machine.
+    call "%~dp0stop-all.bat" >nul 2>nul
     rmdir /s /q "backend\venv"
+    if exist "backend\venv" (
+        echo ERROR: backend\venv is still locked by another process.
+        echo Close any Python, VS Code, or terminal windows using this project,
+        echo then run run.bat again.
+        pause
+        exit /b 1
+    )
     call "%~dp0setup.bat" --auto
     if errorlevel 1 (
         echo ERROR: failed to rebuild the backend environment.
@@ -116,7 +124,15 @@ if errorlevel 1 (
 if errorlevel 1 (
     echo The desktop-agent venv appears stale, broken, or locked by Windows.
     echo Rebuilding the desktop-agent environment from scratch.
+    call "%~dp0stop-all.bat" >nul 2>nul
     rmdir /s /q "desktop-agent\venv"
+    if exist "desktop-agent\venv" (
+        echo ERROR: desktop-agent\venv is still locked by another process.
+        echo Close any Python, VS Code, or terminal windows using this project,
+        echo then run run.bat again.
+        pause
+        exit /b 1
+    )
     call "%~dp0setup.bat" --auto
     if errorlevel 1 (
         echo ERROR: failed to rebuild the desktop-agent environment.
