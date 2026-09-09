@@ -26,6 +26,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from getpass import getpass
+from pynput import keyboard, mouse
 
 import mss
 import requests
@@ -41,6 +42,8 @@ from config import (
     SCREENSHOT_NOTIFICATIONS_ENABLED,
     TOKEN_FILE,
 )
+
+IDLE_TIMEOUT_SECONDS = 300
 
 
 def _has_display():
@@ -105,6 +108,69 @@ def prompt_login_gui(error_message=None):
     return result["email"], result["password"]
 
 
+class ActivityMonitor:
+    """Track mouse and keyboard activity through one monitor per input type."""
+
+    def __init__(self, on_idle_change):
+        self._on_idle_change = on_idle_change
+        self._last_activity = time.monotonic()
+        self._idle = False
+        self._stop_event = threading.Event()
+        self._state_lock = threading.Lock()
+        self._thread = None
+        self._mouse_listener = None
+        self._keyboard_listener = None
+
+    def start(self):
+        with self._state_lock:
+            if self._thread and self._thread.is_alive():
+                return
+            self._last_activity = time.monotonic()
+            self._idle = False
+            self._stop_event.clear()
+            self._mouse_listener = mouse.Listener(
+                on_move=self._activity,
+                on_click=self._activity,
+                on_scroll=self._activity,
+            )
+            self._keyboard_listener = keyboard.Listener(on_press=self._activity)
+            self._mouse_listener.start()
+            self._keyboard_listener.start()
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        for listener in (self._mouse_listener, self._keyboard_listener):
+            if listener:
+                listener.stop()
+        if self._thread and self._thread is not threading.current_thread():
+            self._thread.join(timeout=2)
+        self._mouse_listener = None
+        self._keyboard_listener = None
+        self._thread = None
+
+    def _activity(self, *args):
+        became_active = False
+        with self._state_lock:
+            self._last_activity = time.monotonic()
+            if self._idle:
+                self._idle = False
+                became_active = True
+        if became_active:
+            self._on_idle_change(False)
+
+    def _run(self):
+        while not self._stop_event.wait(1):
+            became_idle = False
+            with self._state_lock:
+                if not self._idle and time.monotonic() - self._last_activity >= IDLE_TIMEOUT_SECONDS:
+                    self._idle = True
+                    became_idle = True
+            if became_idle:
+                self._on_idle_change(True)
+
+
 class TrackerAgent:
     def __init__(self):
         self.token = None
@@ -113,6 +179,10 @@ class TrackerAgent:
         self._stop_event = threading.Event()
         self._worker_thread = None
         self._command_thread = None
+        self._start_lock = threading.Lock()
+        self._activity_monitor = None
+        self._idle = False
+        self._resume_after_idle = False
         self.icon = None
 
     # ---------- Notifications ----------
@@ -246,9 +316,7 @@ class TrackerAgent:
             if entry:
                 self.active_entry_id = entry["id"]
                 self.tracking = True
-                self._stop_event.clear()
-                self._worker_thread = threading.Thread(target=self._tracking_loop, daemon=True)
-                self._worker_thread.start()
+                self._start_worker()
             else:
                 self.active_entry_id = None
                 self.tracking = False
@@ -280,7 +348,42 @@ class TrackerAgent:
 
     # ---------- Tracking control ----------
 
+    def _start_worker(self):
+        if self._worker_thread and self._worker_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._worker_thread = threading.Thread(target=self._tracking_loop, daemon=True)
+        self._worker_thread.start()
+
+    def _start_activity_monitor(self):
+        if not self._activity_monitor:
+            self._activity_monitor = ActivityMonitor(self._handle_idle_change)
+        self._activity_monitor.start()
+
+    def _handle_idle_change(self, is_idle):
+        self._idle = is_idle
+        if is_idle:
+            if self.tracking:
+                entry_id = self.active_entry_id
+                self.notify(
+                    f"Tracking stopped after 30 seconds of inactivity "
+                    f"(session #{entry_id})."
+                )
+                self._stop_tracking(notify_user=False, preserve_for_idle=True)
+        elif self._resume_after_idle:
+            self._resume_after_idle = False
+            self.start_tracking()
+            self.notify("Activity detected. Tracking resumed.")
+
     def start_tracking(self, icon=None, item=None):
+        if not self._start_lock.acquire(blocking=False):
+            return
+        try:
+            self._start_tracking()
+        finally:
+            self._start_lock.release()
+
+    def _start_tracking(self):
         if self.tracking:
             return
 
@@ -328,15 +431,20 @@ class TrackerAgent:
 
         self.active_entry_id = resp.json()["id"]
         self.tracking = True
-        self._stop_event.clear()
-        self._worker_thread = threading.Thread(target=self._tracking_loop, daemon=True)
-        self._worker_thread.start()
+        self._idle = False
+        self._start_worker()
         self._update_menu()
         self.notify(f"Tracking started (IP {ip_address})")
 
     def stop_tracking(self, icon=None, item=None):
+        self._stop_tracking()
+
+    def _stop_tracking(self, notify_user=True, preserve_for_idle=False):
         if not self.tracking:
+            if not preserve_for_idle:
+                self._resume_after_idle = False
             return
+        self._resume_after_idle = preserve_for_idle
         self.tracking = False
         self._stop_event.set()
         if self._worker_thread:
@@ -350,16 +458,22 @@ class TrackerAgent:
                 timeout=10,
             )
             resp.raise_for_status()
-            self.notify(f"Tracking stopped (session #{entry_id})")
+            if notify_user:
+                if preserve_for_idle:
+                    self.notify(f"Tracking paused (session #{entry_id})")
+                else:
+                    self.notify(f"Tracking stopped (session #{entry_id})")
         except requests.exceptions.HTTPError as exc:
             if exc.response is not None and exc.response.status_code == 401:
                 self._handle_unauthorized()
             else:
-                self.notify(f"Tracking stopped locally, but the server didn't confirm it "
-                            f"(HTTP {exc.response.status_code if exc.response else '?'}).")
+                if notify_user:
+                    self.notify(f"Tracking stopped locally, but the server didn't confirm it "
+                                f"(HTTP {exc.response.status_code if exc.response else '?'}).")
         except requests.exceptions.RequestException as e:
-            self.notify(f"Tracking stopped locally, but couldn't reach the server to confirm "
-                        f"it ({e.__class__.__name__}). It may still show as active on the dashboard.")
+            if notify_user:
+                self.notify(f"Tracking stopped locally, but couldn't reach the server to confirm it "
+                            f"({e.__class__.__name__}). It may still show as active on the dashboard.")
 
         self.active_entry_id = None
         self._update_menu()
@@ -447,6 +561,7 @@ class TrackerAgent:
             "Org Tracker (stopped)",
             menu=self._build_menu(),
         )
+        self._start_activity_monitor()
         self.sync_active_entry()
         if AUTO_START_TRACKING and not self.tracking:
             self.start_tracking()
