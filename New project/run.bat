@@ -21,6 +21,18 @@ if exist "backend\.env" (
 )
 set "TRACKER_BACKEND_PORT=%PORT%"
 set "TRACKER_DASHBOARD_PORT=%DASHBOARD_PORT%"
+
+REM Install desktop-agent requirements before the already-running check so
+REM newly pulled packages such as pynput are never skipped.
+if exist "desktop-agent\venv\Scripts\python.exe" (
+    "desktop-agent\venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r "desktop-agent\requirements.txt"
+    if errorlevel 1 (
+        echo ERROR: failed to install desktop-agent requirements.
+        pause
+        exit /b 1
+    )
+)
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ZgB1AG4AYwB0AGkAbwBuACAAUgBlAGEAZAAtAFUAcgBsACgAJAB1AHIAbAApACAAewAKACAAIAAgACAAdAByAHkAIAB7AAoAIAAgACAAIAAgACAAIAAgACQAcgBlAHEAdQBlAHMAdAAgAD0AIABbAE4AZQB0AC4AVwBlAGIAUgBlAHEAdQBlAHMAdABdADoAOgBDAHIAZQBhAHQAZQAoACQAdQByAGwAKQAKACAAIAAgACAAIAAgACAAIAAkAHIAZQBxAHUAZQBzAHQALgBUAGkAbQBlAG8AdQB0ACAAPQAgADEAMAAwADAACgAgACAAIAAgACAAIAAgACAAJAByAGUAcwBwAG8AbgBzAGUAIAA9ACAAJAByAGUAcQB1AGUAcwB0AC4ARwBlAHQAUgBlAHMAcABvAG4AcwBlACgAKQAKACAAIAAgACAAIAAgACAAIAAkAHIAZQBhAGQAZQByACAAPQAgAE4AZQB3AC0ATwBiAGoAZQBjAHQAIABJAE8ALgBTAHQAcgBlAGEAbQBSAGUAYQBkAGUAcgAoACQAcgBlAHMAcABvAG4AcwBlAC4ARwBlAHQAUgBlAHMAcABvAG4AcwBlAFMAdAByAGUAYQBtACgAKQApAAoAIAAgACAAIAAgACAAIAAgACQAdABlAHgAdAAgAD0AIAAkAHIAZQBhAGQAZQByAC4AUgBlAGEAZABUAG8ARQBuAGQAKAApAAoAIAAgACAAIAAgACAAIAAgACQAcgBlAGEAZABlAHIALgBDAGwAbwBzAGUAKAApAAoAIAAgACAAIAAgACAAIAAgACQAcgBlAHMAcABvAG4AcwBlAC4AQwBsAG8AcwBlACgAKQAKACAAIAAgACAAIAAgACAAIAByAGUAdAB1AHIAbgAgACQAdABlAHgAdAAKACAAIAAgACAAfQAgAGMAYQB0AGMAaAAgAHsACgAgACAAIAAgACAAIAAgACAAcgBlAHQAdQByAG4AIAAnACcACgAgACAAIAAgAH0ACgB9AAoACgAkAGIAYQBjAGsAZQBuAGQAUABvAHIAdAAgAD0AIAA4ADAAMAAwAAoAJABkAGEAcwBoAGIAbwBhAHIAZABQAG8AcgB0ACAAPQAgADUAMQA3ADMACgBbAGkAbgB0AF0AOgA6AFQAcgB5AFAAYQByAHMAZQAoACQAZQBuAHYAOgBUAFIAQQBDAEsARQBSAF8AQgBBAEMASwBFAE4ARABfAFAATwBSAFQALAAgAFsAcgBlAGYAXQAkAGIAYQBjAGsAZQBuAGQAUABvAHIAdAApACAAfAAgAE8AdQB0AC0ATgB1AGwAbAAKAFsAaQBuAHQAXQA6ADoAVAByAHkAUABhAHIAcwBlACgAJABlAG4AdgA6AFQAUgBBAEMASwBFAFIAXwBEAEEAUwBIAEIATwBBAFIARABfAFAATwBSAFQALAAgAFsAcgBlAGYAXQAkAGQAYQBzAGgAYgBvAGEAcgBkAFAAbwByAHQAKQAgAHwAIABPAHUAdAAtAE4AdQBsAGwACgAKACQAaABlAGEAbAB0AGgAIAA9ACAAUgBlAGEAZAAtAFUAcgBsACAAIgBoAHQAdABwADoALwAvADEAMgA3AC4AMAAuADAALgAxADoAJABiAGEAYwBrAGUAbgBkAFAAbwByAHQALwBoAGUAYQBsAHQAaAAiAAoAaQBmACAAKAAkAGgAZQBhAGwAdABoACAALQBtAGEAdABjAGgAIAAnACIAcwB0AGEAdAB1AHMAIgBcAHMAKgA6AFwAcwAqACIAbwBrACIAJwApACAAewAgAGUAeABpAHQAIAAwACAAfQAKAAoAJABkAGEAcwBoAGIAbwBhAHIAZAAgAD0AIABSAGUAYQBkAC0AVQByAGwAIAAiAGgAdABwADoALwAvADEAMgA3AC4AMAAuADAALgAxADoAJABkAGEAcwBoAGIAbwBhAHIAZABQAG8AcgB0AC8AIgAKAGkAZgAgACgAJABkAGEAcwBoAGIAbwBhAHIAZAAgAC0AbABpAGsAZQAgACcAKgA8AHQAaQB0AGwAZQA+AE8AcgBnACAAVAByAGEAYwBrAGUAcgA8AC8AdABpAHQAbABlAD4AKgAnACkAIAB7ACAAZQB4AGkAdAAgADAAIAB9AAoACgBlAHgAaQB0ACAAMQA= >nul 2>nul
 if not errorlevel 1 set "TRACKER_ALREADY_RUNNING=1"
 
@@ -68,6 +80,32 @@ if defined NEED_SETUP (
         exit /b 1
     )
     echo.
+)
+
+REM Keep an existing installation synchronized after pulling new requirements.
+REM setup.bat creates fresh environments; this lightweight step updates them
+REM without deleting the user's existing environment or configuration.
+echo Checking Python and frontend requirements...
+"backend\venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r "backend\requirements.txt"
+if errorlevel 1 (
+    echo ERROR: failed to install backend requirements.
+    pause
+    exit /b 1
+)
+"desktop-agent\venv\Scripts\python.exe" -m pip install --disable-pip-version-check -r "desktop-agent\requirements.txt"
+if errorlevel 1 (
+    echo ERROR: failed to install desktop-agent requirements.
+    pause
+    exit /b 1
+)
+pushd frontend
+call npm install
+set "FRONTEND_INSTALL_EXIT=%ERRORLEVEL%"
+popd
+if not "%FRONTEND_INSTALL_EXIT%"=="0" (
+    echo ERROR: failed to install frontend requirements.
+    pause
+    exit /b %FRONTEND_INSTALL_EXIT%
 )
 
 if not exist "%AUTOSTART_SHORTCUT%" (
