@@ -81,3 +81,12 @@ class Screenshot(Base):
 
     time_entry = relationship("TimeEntry", back_populates="screenshots")
     user = relationship("User")
+
+
+class AppSettings(Base):
+    __tablename__ = "app_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    screenshot_interval_seconds = Column(Integer, nullable=False, default=300)
+    idle_timeout_seconds = Column(Integer, nullable=False, default=300)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

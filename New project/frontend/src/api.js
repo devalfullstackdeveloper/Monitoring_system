@@ -82,6 +82,20 @@ export async function listScreenshots(userId, timeEntryId) {
   return handle(resp);
 }
 
+export async function getSettings() {
+  const resp = await fetch(`${BACKEND_URL}/settings`, { headers: authHeaders() });
+  return handle(resp);
+}
+
+export async function updateSettings(payload) {
+  const resp = await fetch(`${BACKEND_URL}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return handle(resp);
+}
+
 export function screenshotUrl(filePath) {
   // backend serves the storage dir at /media/screenshots
   // normalize Windows backslashes to forward slashes before matching

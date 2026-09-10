@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
-from typing import Optional
- 
-from pydantic import BaseModel, EmailStr, field_serializer
+from typing import Optional 
+from pydantic import BaseModel, EmailStr, Field, field_serializer
  
 from .models import UserRole, TimeEntryStatus
  
@@ -102,10 +101,23 @@ class ScreenshotOut(BaseModel):
     ip_address: str
     activity_level: Optional[float]
     captured_at: datetime
- 
+
     class Config:
         from_attributes = True
- 
+
     @field_serializer("captured_at")
     def serialize_dt(self, dt: datetime, _info):
         return _as_utc_iso(dt)
+
+
+class SettingsOut(BaseModel):
+    screenshot_interval_seconds: int
+    idle_timeout_seconds: int
+
+    class Config:
+        from_attributes = True
+
+
+class SettingsUpdate(BaseModel):
+    screenshot_interval_seconds: int = Field(ge=30, le=3600)
+    idle_timeout_seconds: int = Field(ge=30, le=3600)

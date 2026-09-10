@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import models
 from .database import engine
-from .routers import auth, users, time_entries, screenshots
+from .routers import auth, users, time_entries, screenshots, settings
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -39,6 +39,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(time_entries.router)
 app.include_router(screenshots.router)
+app.include_router(settings.router)
 
 
 @app.get("/health")

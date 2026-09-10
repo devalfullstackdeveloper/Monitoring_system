@@ -39,11 +39,10 @@ from config import (
     AUTO_START_TRACKING,
     DATA_DIR,
     SCREENSHOT_INTERVAL_SECONDS,
+    IDLE_TIMEOUT_SECONDS,
     SCREENSHOT_NOTIFICATIONS_ENABLED,
     TOKEN_FILE,
 )
-
-IDLE_TIMEOUT_SECONDS = 300
 
 
 def _has_display():
@@ -111,8 +110,9 @@ def prompt_login_gui(error_message=None):
 class ActivityMonitor:
     """Track mouse and keyboard activity through one monitor per input type."""
 
-    def __init__(self, on_idle_change):
+    def __init__(self, on_idle_change, timeout_seconds=IDLE_TIMEOUT_SECONDS):
         self._on_idle_change = on_idle_change
+        self._timeout_seconds = timeout_seconds
         self._last_activity = time.monotonic()
         self._idle = False
         self._stop_event = threading.Event()
@@ -120,6 +120,10 @@ class ActivityMonitor:
         self._thread = None
         self._mouse_listener = None
         self._keyboard_listener = None
+
+    def set_timeout(self, timeout_seconds):
+        with self._state_lock:
+            self._timeout_seconds = timeout_seconds
 
     def start(self):
         with self._state_lock:
@@ -164,7 +168,8 @@ class ActivityMonitor:
         while not self._stop_event.wait(1):
             became_idle = False
             with self._state_lock:
-                if not self._idle and time.monotonic() - self._last_activity >= IDLE_TIMEOUT_SECONDS:
+                timeout = self._timeout_seconds
+                if not self._idle and time.monotonic() - self._last_activity >= timeout:
                     self._idle = True
                     became_idle = True
             if became_idle:
@@ -183,7 +188,10 @@ class TrackerAgent:
         self._activity_monitor = None
         self._idle = False
         self._resume_after_idle = False
+        self._settings_thread = None
         self.icon = None
+        self.screenshot_interval_seconds = SCREENSHOT_INTERVAL_SECONDS
+        self.idle_timeout_seconds = IDLE_TIMEOUT_SECONDS
 
     # ---------- Notifications ----------
 
@@ -285,6 +293,40 @@ class TrackerAgent:
     def auth_headers(self):
         return {"Authorization": f"Bearer {self.token}"}
 
+    def fetch_settings(self):
+        if not self.token:
+            return
+        try:
+            resp = requests.get(
+                f"{BACKEND_URL}/settings",
+                headers=self.auth_headers(),
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            new_interval = data.get("screenshot_interval_seconds")
+            if isinstance(new_interval, int) and new_interval > 0:
+                if new_interval != self.screenshot_interval_seconds:
+                    print(f"Screenshot interval updated: {self.screenshot_interval_seconds}s -> {new_interval}s")
+                self.screenshot_interval_seconds = new_interval
+
+            new_idle_timeout = data.get("idle_timeout_seconds")
+            if isinstance(new_idle_timeout, int) and new_idle_timeout > 0:
+                if new_idle_timeout != self.idle_timeout_seconds:
+                    print(f"Idle timeout updated: {self.idle_timeout_seconds}s -> {new_idle_timeout}s")
+                self.idle_timeout_seconds = new_idle_timeout
+                if self._activity_monitor:
+                    self._activity_monitor.set_timeout(new_idle_timeout)
+        except requests.exceptions.RequestException as e:
+            print(f"Could not refresh settings ({e.__class__.__name__}); keeping current interval.")
+        except Exception as e:
+            print(f"Unexpected error refreshing settings: {e}")
+
+    def _settings_loop(self):
+        while True:
+            self.fetch_settings()
+            time.sleep(300)
+
     def _get_error_detail(self, response):
         try:
             return response.json().get("detail")
@@ -357,7 +399,9 @@ class TrackerAgent:
 
     def _start_activity_monitor(self):
         if not self._activity_monitor:
-            self._activity_monitor = ActivityMonitor(self._handle_idle_change)
+            self._activity_monitor = ActivityMonitor(self._handle_idle_change, self.idle_timeout_seconds)
+        else:
+            self._activity_monitor.set_timeout(self.idle_timeout_seconds)
         self._activity_monitor.start()
 
     def _handle_idle_change(self, is_idle):
@@ -366,7 +410,7 @@ class TrackerAgent:
             if self.tracking:
                 entry_id = self.active_entry_id
                 self.notify(
-                    f"Tracking stopped after 30 seconds of inactivity "
+                    f"Tracking stopped after {self.idle_timeout_seconds} seconds of inactivity "
                     f"(session #{entry_id})."
                 )
                 self._stop_tracking(notify_user=False, preserve_for_idle=True)
@@ -485,7 +529,7 @@ class TrackerAgent:
             if self._stop_event.wait(timeout=1):
                 break
             elapsed += 1
-            if elapsed >= SCREENSHOT_INTERVAL_SECONDS:
+            if elapsed >= self.screenshot_interval_seconds:
                 elapsed = 0
                 try:
                     self._capture_and_upload()
@@ -562,11 +606,14 @@ class TrackerAgent:
             menu=self._build_menu(),
         )
         self._start_activity_monitor()
+        self.fetch_settings()
         self.sync_active_entry()
         if AUTO_START_TRACKING and not self.tracking:
             self.start_tracking()
         self._command_thread = threading.Thread(target=self._command_loop, daemon=True)
         self._command_thread.start()
+        self._settings_thread = threading.Thread(target=self._settings_loop, daemon=True)
+        self._settings_thread.start()
         print("Agent started. Look for the tray icon in the notification area.")
         self.icon.run()
 
