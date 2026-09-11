@@ -35,12 +35,16 @@ from PIL import Image
 import pystray
 from pystray import MenuItem as Item
 
+from media_activity import is_foreground_media_playing
+
 from config import (
     BACKEND_URL,
     AUTO_START_TRACKING,
     DATA_DIR,
     SCREENSHOT_INTERVAL_SECONDS,
     IDLE_TIMEOUT_SECONDS,
+    MEDIA_ACTIVITY_DETECTION_ENABLED,
+    MEDIA_CHECK_INTERVAL_SECONDS,
     SCREENSHOT_NOTIFICATIONS_ENABLED,
     TOKEN_FILE,
 )
@@ -115,6 +119,7 @@ class ActivityMonitor:
         self._on_idle_change = on_idle_change
         self._timeout_seconds = timeout_seconds
         self._last_activity = time.monotonic()
+        self._last_media_check = 0.0
         self._idle = False
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
@@ -159,6 +164,7 @@ class ActivityMonitor:
             if self._thread and self._thread.is_alive():
                 return
             self._last_activity = time.monotonic()
+            self._last_media_check = 0.0
             self._idle = False
             self._stop_event.clear()
             # Reset Windows input timestamp when monitoring starts.
@@ -236,9 +242,17 @@ class ActivityMonitor:
             self._on_idle_change(False)
 
     def _run(self):
-        while not self._stop_event.wait(0.25):
-            # Check Windows-level input.
-            self._check_windows_input()
+        while not self._stop_event.wait(1):
+            now = time.monotonic()
+
+            if (
+                MEDIA_ACTIVITY_DETECTION_ENABLED
+                and now - self._last_media_check >= MEDIA_CHECK_INTERVAL_SECONDS
+            ):
+                self._last_media_check = now
+                if is_foreground_media_playing():
+                    self._activity()
+                    continue
             became_idle = False
             with self._state_lock:
                 timeout = self._timeout_seconds

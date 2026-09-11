@@ -101,16 +101,26 @@ export default function EmployeeDetail() {
     ? Math.round(dayShots.reduce((sum, s) => sum + (s.activity_level || 0), 0) / dayShots.length)
     : 0;
 
-  // ---- Activity Level chart: built from real active (tracked) time, bucketed by granularity ----
+  // ---- Idle Time chart: derived from tracked activity in each time bucket ----
   const buckets = useMemo(() => {
     const anchor = new Date(`${dateFilter}T00:00:00`);
+    const now = new Date();
+    const isToday = dateFilter === todayStr();
+    const currentHour = isToday ? now.getHours() : 23;
+
+    const buildBucket = (rangeStart, rangeEnd, label) => {
+      const effectiveEnd = isToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
+      const activeSeconds = entries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
+      const bucketSeconds = Math.max(0, Math.floor((effectiveEnd.getTime() - rangeStart.getTime()) / 1000));
+      return { label, seconds: Math.max(0, bucketSeconds - activeSeconds) };
+    };
 
     if (granularity === "daily") {
-      return Array.from({ length: 24 }, (_, h) => {
+      const bucketCount = isToday ? currentHour + 1 : 24;
+      return Array.from({ length: bucketCount }, (_, h) => {
         const rangeStart = new Date(anchor); rangeStart.setHours(h, 0, 0, 0);
         const rangeEnd = new Date(anchor); rangeEnd.setHours(h + 1, 0, 0, 0);
-        const seconds = entries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, rangeEnd), 0);
-        return { label: `${String(h).padStart(2, "0")}:00`, seconds };
+        return buildBucket(rangeStart, rangeEnd, `${String(h).padStart(2, "0")}:00`);
       });
     }
 
@@ -119,19 +129,16 @@ export default function EmployeeDetail() {
       return Array.from({ length: 7 }, (_, i) => {
         const rangeStart = new Date(weekStart); rangeStart.setDate(weekStart.getDate() + i);
         const rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate() + 1);
-        const seconds = entries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, rangeEnd), 0);
-        return { label: rangeStart.toLocaleDateString([], { weekday: "short" }), seconds };
+        return buildBucket(rangeStart, rangeEnd, rangeStart.toLocaleDateString([], { weekday: "short" }));
       });
     }
 
-    // monthly
     const monthStart = startOfMonth(anchor);
     const total = daysInMonth(anchor);
     return Array.from({ length: total }, (_, i) => {
       const rangeStart = new Date(monthStart); rangeStart.setDate(i + 1);
       const rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate() + 1);
-      const seconds = entries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, rangeEnd), 0);
-      return { label: String(i + 1), seconds };
+      return buildBucket(rangeStart, rangeEnd, String(i + 1));
     });
   }, [entries, dateFilter, granularity]);
 
@@ -228,7 +235,7 @@ export default function EmployeeDetail() {
       <div className="detail-grid-2">
         <div className="card">
           <div className="card-header-row">
-            <h3>Activity Level</h3>
+            <h3>Idle Time</h3>
             <div className="chart-toolbar">
               <select value={granularity} onChange={(e) => setGranularity(e.target.value)}>
                 <option value="daily">Daily</option>

@@ -37,6 +37,10 @@ load_dotenv(os.path.join(APP_DIR, ".env"))
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 SCREENSHOT_INTERVAL_SECONDS = int(os.getenv("SCREENSHOT_INTERVAL_SECONDS", "300"))
 IDLE_TIMEOUT_SECONDS = int(os.getenv("IDLE_TIMEOUT_SECONDS", "30"))
+MEDIA_ACTIVITY_DETECTION_ENABLED = os.getenv(
+    "MEDIA_ACTIVITY_DETECTION_ENABLED", "true"
+).lower() in ("1", "true", "yes", "on")
+MEDIA_CHECK_INTERVAL_SECONDS = int(os.getenv("MEDIA_CHECK_INTERVAL_SECONDS", "5"))
 SCREENSHOT_NOTIFICATIONS_ENABLED = os.getenv(
     "SCREENSHOT_NOTIFICATIONS_ENABLED", "true"
 ).lower() in ("1", "true", "yes", "on")
