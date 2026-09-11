@@ -27,6 +27,7 @@ import traceback
 from datetime import datetime, timezone
 from getpass import getpass
 from pynput import keyboard, mouse
+import ctypes
 
 import mss
 import requests
@@ -108,7 +109,7 @@ def prompt_login_gui(error_message=None):
 
 
 class ActivityMonitor:
-    """Track mouse and keyboard activity through one monitor per input type."""
+    """Track mouse, keyboard, and Windows system input activity."""
 
     def __init__(self, on_idle_change, timeout_seconds=IDLE_TIMEOUT_SECONDS):
         self._on_idle_change = on_idle_change
@@ -121,6 +122,34 @@ class ActivityMonitor:
         self._mouse_listener = None
         self._keyboard_listener = None
 
+        # Windows system-input tracking
+        self._last_system_input = self._get_system_input_time()
+        
+    @staticmethod
+    def _get_system_input_time():
+        """
+        Get the time of the last user input reported by Windows.
+
+        This acts as an additional activity source for things such as
+        Precision Touchpad gestures that may not reach pynput's
+        on_scroll callback.
+        """
+        if sys.platform != "win32":
+            return None
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint),
+                ("dwTime", ctypes.c_uint),
+            ]
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+
+        try:
+            if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+                return info.dwTime
+        except Exception:
+            pass
+        return None
     def set_timeout(self, timeout_seconds):
         with self._state_lock:
             self._timeout_seconds = timeout_seconds
@@ -132,23 +161,36 @@ class ActivityMonitor:
             self._last_activity = time.monotonic()
             self._idle = False
             self._stop_event.clear()
+            # Reset Windows input timestamp when monitoring starts.
+            self._last_system_input = self._get_system_input_time()
             self._mouse_listener = mouse.Listener(
                 on_move=self._activity,
                 on_click=self._activity,
                 on_scroll=self._activity,
             )
-            self._keyboard_listener = keyboard.Listener(on_press=self._activity)
+            self._keyboard_listener = keyboard.Listener(
+                on_press=self._activity
+            )
             self._mouse_listener.start()
             self._keyboard_listener.start()
-            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread = threading.Thread(
+                target=self._run,
+                daemon=True
+            )
             self._thread.start()
 
     def stop(self):
         self._stop_event.set()
-        for listener in (self._mouse_listener, self._keyboard_listener):
+        for listener in (
+            self._mouse_listener,
+            self._keyboard_listener
+        ):
             if listener:
                 listener.stop()
-        if self._thread and self._thread is not threading.current_thread():
+        if (
+            self._thread
+            and self._thread is not threading.current_thread()
+        ):
             self._thread.join(timeout=2)
         self._mouse_listener = None
         self._keyboard_listener = None
@@ -161,15 +203,49 @@ class ActivityMonitor:
             if self._idle:
                 self._idle = False
                 became_active = True
+
+        if became_active:
+            self._on_idle_change(False)
+
+    def _check_windows_input(self):
+        """
+        Check whether Windows has registered new user input.
+        This is especially useful for Precision Touchpad gestures.
+        """
+        current_input = self._get_system_input_time()
+
+        if current_input is None:
+            return
+
+        with self._state_lock:
+            previous_input = self._last_system_input
+            if (
+                previous_input is not None
+                and current_input != previous_input
+            ):
+                self._last_activity = time.monotonic()
+                if self._idle:
+                    self._idle = False
+                    became_active = True
+                else:
+                    became_active = False
+            else:
+                became_active = False
+            self._last_system_input = current_input
         if became_active:
             self._on_idle_change(False)
 
     def _run(self):
-        while not self._stop_event.wait(1):
+        while not self._stop_event.wait(0.25):
+            # Check Windows-level input.
+            self._check_windows_input()
             became_idle = False
             with self._state_lock:
                 timeout = self._timeout_seconds
-                if not self._idle and time.monotonic() - self._last_activity >= timeout:
+                if (
+                    not self._idle
+                    and time.monotonic() - self._last_activity >= timeout
+                ):
                     self._idle = True
                     became_idle = True
             if became_idle:
