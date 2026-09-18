@@ -2,12 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import { getUser, listTimeEntries, listScreenshots } from "../api";
 
-function localDay(dateStr) {
-  const d = new Date(dateStr);
+function toLocalDateKey(dateLike) {
+  const d = new Date(dateLike);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+function localDay(dateStr) {
+  return toLocalDateKey(dateStr);
+}
 function todayStr() {
-  return localDay(new Date().toISOString());
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 function formatHM(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -85,23 +89,41 @@ export default function EmployeeDetail() {
   const dayShots = useMemo(() => screenshots.filter((s) => localDay(s.captured_at) === dateFilter), [screenshots, dateFilter]);
 
   const activeEntry = entries.find((e) => e.status === "active");
-  const workSeconds = dayEntries.reduce((sum, e) => sum + liveDuration(e), 0);
 
-  // Idle Time = gaps between the first "start" and last "end" (or now) where the tracker wasn't running
-  const idleSeconds = useMemo(() => {
-    if (dayEntries.length === 0) return 0;
-    const firstStart = new Date(dayEntries[0].start_time).getTime();
-    const lastEntry = dayEntries[dayEntries.length - 1];
-    const lastEnd = effectiveEnd(lastEntry).getTime();
-    const totalSpan = Math.max(0, Math.floor((lastEnd - firstStart) / 1000));
-    return Math.max(totalSpan - workSeconds, 0);
-  }, [dayEntries, workSeconds]);
+  const dayBuckets = useMemo(() => {
+    const anchor = new Date(`${dateFilter}T00:00:00`);
+    const now = new Date();
+    const isToday = dateFilter === todayStr();
+    const currentHour = isToday ? now.getHours() : 23;
+    const bucketCount = isToday ? currentHour + 1 : 24;
+
+    return Array.from({ length: bucketCount }, (_, h) => {
+      const rangeStart = new Date(anchor);
+      rangeStart.setHours(h, 0, 0, 0);
+
+      const rangeEnd = new Date(anchor);
+      rangeEnd.setHours(h + 1, 0, 0, 0);
+
+      const effectiveEnd = isToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
+      const activeSeconds = dayEntries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
+      const bucketSeconds = Math.max(0, Math.floor((effectiveEnd.getTime() - rangeStart.getTime()) / 1000));
+
+      return {
+        label: `${String(h).padStart(2, "0")}:00`,
+        activeSeconds,
+        idleSeconds: Math.max(0, bucketSeconds - activeSeconds),
+      };
+    });
+  }, [dateFilter, dayEntries]);
+
+  const workSeconds = dayBuckets.reduce((sum, bucket) => sum + bucket.activeSeconds, 0);
+  const idleSeconds = dayBuckets.reduce((sum, bucket) => sum + bucket.idleSeconds, 0);
 
   const avgActivity = dayShots.length
     ? Math.round(dayShots.reduce((sum, s) => sum + (s.activity_level || 0), 0) / dayShots.length)
     : 0;
 
-  // ---- Idle Time chart: derived from tracked activity in each time bucket ----
+  // ---- Work Time chart: actual tracked activity per time bucket ----
   const buckets = useMemo(() => {
     const anchor = new Date(`${dateFilter}T00:00:00`);
     const now = new Date();
@@ -110,9 +132,9 @@ export default function EmployeeDetail() {
 
     const buildBucket = (rangeStart, rangeEnd, label) => {
       const effectiveEnd = isToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
-      const activeSeconds = entries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
+      const activeSeconds = dayEntries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
       const bucketSeconds = Math.max(0, Math.floor((effectiveEnd.getTime() - rangeStart.getTime()) / 1000));
-      return { label, seconds: Math.max(0, bucketSeconds - activeSeconds) };
+      return { label, seconds: Math.min(activeSeconds, bucketSeconds) };
     };
 
     if (granularity === "daily") {
@@ -140,7 +162,7 @@ export default function EmployeeDetail() {
       const rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate() + 1);
       return buildBucket(rangeStart, rangeEnd, String(i + 1));
     });
-  }, [entries, dateFilter, granularity]);
+  }, [dayEntries, dateFilter, granularity]);
 
   const maxBucketSeconds = Math.max(...buckets.map((b) => b.seconds), 60);
 
@@ -235,7 +257,7 @@ export default function EmployeeDetail() {
       <div className="detail-grid-2">
         <div className="card">
           <div className="card-header-row">
-            <h3>Idle Time</h3>
+            <h3>Work Time</h3>
             <div className="chart-toolbar">
               <select value={granularity} onChange={(e) => setGranularity(e.target.value)}>
                 <option value="daily">Daily</option>
@@ -262,7 +284,7 @@ export default function EmployeeDetail() {
                           <span className="activity-bar-tip">{formatHM(b.seconds)}</span>
                         </div>
                       ) : (
-                        <div className="activity-bar-zero" title="No activity" />
+                        <div className="activity-bar-zero" title="No work" />
                       )}
                     </div>
                   ))}

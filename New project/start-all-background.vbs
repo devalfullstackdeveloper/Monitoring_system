@@ -7,10 +7,12 @@ root = fso.GetParentFolderName(WScript.ScriptFullName)
 q = Chr(34)
 
 Dim backendPython, agentPython
+Dim agentCheckPython
 backendPython = root & "\backend\venv\Scripts\python.exe"
 agentPython = root & "\desktop-agent\venv\Scripts\pythonw.exe"
+agentCheckPython = root & "\desktop-agent\venv\Scripts\python.exe"
 
-If (Not PythonWorks(backendPython)) Or (Not PythonWorks(agentPython)) Then
+If (Not PythonWorks(backendPython)) Or (Not PythonWorks(agentCheckPython)) Then
     MsgBox "Org Tracker can't start: the backend and/or desktop-agent virtual " & _
            "environment is missing or broken on this computer." & vbCrLf & vbCrLf & _
            "This usually happens when the project folder (including its 'venv' " & _
