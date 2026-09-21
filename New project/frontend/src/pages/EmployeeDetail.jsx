@@ -117,7 +117,17 @@ export default function EmployeeDetail() {
   }, [dateFilter, dayEntries]);
 
   const workSeconds = dayBuckets.reduce((sum, bucket) => sum + bucket.activeSeconds, 0);
-  const idleSeconds = dayBuckets.reduce((sum, bucket) => sum + bucket.idleSeconds, 0);
+  const idleSeconds = useMemo(() => {
+    if (dayEntries.length === 0) return 0;
+
+    const trackingStart = new Date(dayEntries[0].start_time);
+    const latestEnd = dayEntries.reduce((latest, entry) => {
+      const end = effectiveEnd(entry);
+      return end > latest ? end : latest;
+    }, trackingStart);
+    const trackedSeconds = Math.max(0, Math.floor((latestEnd.getTime() - trackingStart.getTime()) / 1000));
+    return Math.max(0, trackedSeconds - workSeconds);
+  }, [dayEntries, workSeconds]);
 
   const avgActivity = dayShots.length
     ? Math.round(dayShots.reduce((sum, s) => sum + (s.activity_level || 0), 0) / dayShots.length)
