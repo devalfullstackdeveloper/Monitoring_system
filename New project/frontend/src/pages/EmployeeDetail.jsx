@@ -129,10 +129,12 @@ export default function EmployeeDetail() {
     const now = new Date();
     const isToday = dateFilter === todayStr();
     const currentHour = isToday ? now.getHours() : 23;
+    const chartEntries = granularity === "daily" ? dayEntries : entries;
 
     const buildBucket = (rangeStart, rangeEnd, label) => {
-      const effectiveEnd = isToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
-      const activeSeconds = dayEntries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
+      const bucketIsToday = toLocalDateKey(rangeStart) === todayStr();
+      const effectiveEnd = bucketIsToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
+      const activeSeconds = chartEntries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
       const bucketSeconds = Math.max(0, Math.floor((effectiveEnd.getTime() - rangeStart.getTime()) / 1000));
       return { label, seconds: Math.min(activeSeconds, bucketSeconds) };
     };
@@ -162,7 +164,7 @@ export default function EmployeeDetail() {
       const rangeEnd = new Date(rangeStart); rangeEnd.setDate(rangeStart.getDate() + 1);
       return buildBucket(rangeStart, rangeEnd, String(i + 1));
     });
-  }, [dayEntries, dateFilter, granularity]);
+  }, [dayEntries, dateFilter, entries, granularity]);
 
   const maxBucketSeconds = Math.max(...buckets.map((b) => b.seconds), 60);
 
