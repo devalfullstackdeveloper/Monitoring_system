@@ -9,6 +9,12 @@ function localDay(dateStr) {
 function todayStr() {
   return localDay(new Date().toISOString());
 }
+function dayRange(dateString) {
+  const start = new Date(`${dateString}T00:00:00`);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
+}
 function formatHM(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
@@ -78,24 +84,28 @@ export default function EmployeeDetail() {
       .finally(() => setLoading(false));
   }, [userId]);
 
-  const dayEntries = useMemo(
-    () => entries.filter((e) => localDay(e.start_time) === dateFilter).sort((a, b) => new Date(a.start_time) - new Date(b.start_time)),
-    [entries, dateFilter]
-  );
+  const selectedDay = useMemo(() => dayRange(dateFilter), [dateFilter]);
+  const dayEntries = useMemo(() => entries
+    .filter((entry) => overlapSeconds(entry, selectedDay.start, selectedDay.end) > 0)
+    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time)),
+  [entries, selectedDay]);
   const dayShots = useMemo(() => screenshots.filter((s) => localDay(s.captured_at) === dateFilter), [screenshots, dateFilter]);
 
   const activeEntry = entries.find((e) => e.status === "active");
-  const workSeconds = dayEntries.reduce((sum, e) => sum + liveDuration(e), 0);
+  const workSeconds = dayEntries.reduce(
+    (sum, entry) => sum + overlapSeconds(entry, selectedDay.start, selectedDay.end),
+    0
+  );
 
   // Idle Time = gaps between the first "start" and last "end" (or now) where the tracker wasn't running
   const idleSeconds = useMemo(() => {
     if (dayEntries.length === 0) return 0;
-    const firstStart = new Date(dayEntries[0].start_time).getTime();
+    const firstStart = Math.max(new Date(dayEntries[0].start_time).getTime(), selectedDay.start.getTime());
     const lastEntry = dayEntries[dayEntries.length - 1];
-    const lastEnd = effectiveEnd(lastEntry).getTime();
+    const lastEnd = Math.min(effectiveEnd(lastEntry).getTime(), selectedDay.end.getTime());
     const totalSpan = Math.max(0, Math.floor((lastEnd - firstStart) / 1000));
     return Math.max(totalSpan - workSeconds, 0);
-  }, [dayEntries, workSeconds]);
+  }, [dayEntries, selectedDay, workSeconds]);
 
   const avgActivity = dayShots.length
     ? Math.round(dayShots.reduce((sum, s) => sum + (s.activity_level || 0), 0) / dayShots.length)
