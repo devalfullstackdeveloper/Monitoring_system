@@ -33,6 +33,8 @@ def start_tracking(
         project_id=payload.project_id,
         start_ip_address=payload.ip_address,
         status=models.TimeEntryStatus.active,
+        last_seen_at=datetime.now(timezone.utc),
+        is_idle=False,
     )
     db.add(entry)
     db.commit()
@@ -93,11 +95,17 @@ def list_time_entries(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     query = db.query(models.TimeEntry)
-    if current_user.role == models.UserRole.admin:
-        if user_id is not None:
-            query = query.filter(models.TimeEntry.user_id == user_id)
+    if current_user.role == models.UserRole.superadmin:
+        visible_ids = None
+    elif current_user.role == models.UserRole.user:
+        visible_ids = {current_user.id}
     else:
-        query = query.filter(models.TimeEntry.user_id == current_user.id)
+        visible_ids = auth.get_descendant_ids(db, current_user.id) | {current_user.id}
+
+    if visible_ids is not None:
+        query = query.filter(models.TimeEntry.user_id.in_(visible_ids))
+    if user_id is not None:
+        query = query.filter(models.TimeEntry.user_id == user_id)
 
     if start_date is not None:
         range_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)

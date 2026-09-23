@@ -210,7 +210,7 @@ export default function EmployeeDetail() {
         <div className="card profile-card">
           <div className="avatar-circle">{user.name.charAt(0).toUpperCase()}</div>
           <h3>{user.name}</h3>
-          <p className="muted">{user.role === "admin" ? "Administrator" : "Employee"}</p>
+          <p className="muted">{{ superadmin: "Super Administrator", admin: "Administrator", manager: "Manager", tl: "Team Lead", user: "Employee" }[user.role] || user.role}</p>
           <div className="profile-row"><span>Email</span><span>{user.email}</span></div>
           <div className="profile-row">
             <span>Status</span>

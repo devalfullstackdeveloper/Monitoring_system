@@ -5,10 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import models
-from .database import engine
+from .database import engine, migrate_schema
 from .routers import auth, users, time_entries, screenshots, settings
 
 models.Base.metadata.create_all(bind=engine)
+migrate_schema()
 
 STORAGE_DIR = os.getenv("SCREENSHOT_STORAGE_DIR", "./storage/screenshots")
 os.makedirs(STORAGE_DIR, exist_ok=True)

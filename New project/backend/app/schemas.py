@@ -27,24 +27,68 @@ class Token(BaseModel):
 # ---- User ----
  
 class UserCreate(BaseModel):
-    name: str
-    email: EmailStr
-    password: str
-    role: UserRole = UserRole.employee
- 
- 
+        name: str
+        email: EmailStr
+        password: str
+        role: UserRole = UserRole.user
+        parent_id:Optional[int] = Field(
+        default=None,
+        description=(
+            "ID of the specific person directly above this user. "
+            "Required and must match the role: admin -> a superadmin's id, "
+            "manager -> a specific admin's id, tl -> a specific manager's id, "
+            "user -> a specific tl's id. Omit only when role is 'superadmin'."
+        ),
+    )
+
+model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "name": "Noise",
+                    "email": "noise@example.com",
+                    "password": "change-this-password",
+                    "role": "tl",
+                    "parent_id": 3,
+                }
+            ]
+        }
+    }
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
+    parent_id: Optional[int] = Field(
+        default=None,
+        description=(
+            "ID of the specific person this user reports to. Required whenever "
+            "role is being changed to admin/manager/tl/user, or whenever you "
+            "want to reassign an existing user to a different parent."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {"name": "Noise", "role": "tl", "is_active": True, "parent_id": 3},
+                {"name": "Root Admin", "role": "superadmin", "is_active": True},
+            ]
+        }
+    }
+
+
 class UserOut(BaseModel):
     id: int
     name: str
     email: EmailStr
     role: UserRole
     is_active: bool
- 
+    parent_id: Optional[int] = None
+
     class Config:
         from_attributes = True
- 
- 
-# ---- Project ----
  
 class ProjectCreate(BaseModel):
     name: str

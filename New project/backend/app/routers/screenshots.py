@@ -65,11 +65,17 @@ def list_screenshots(
 ):
     query = db.query(models.Screenshot)
 
-    if current_user.role == models.UserRole.admin:
-        if user_id is not None:
-            query = query.filter(models.Screenshot.user_id == user_id)
+    if current_user.role == models.UserRole.superadmin:
+        visible_ids = None
+    elif current_user.role == models.UserRole.user:
+        visible_ids = {current_user.id}
     else:
-        query = query.filter(models.Screenshot.user_id == current_user.id)
+        visible_ids = auth.get_descendant_ids(db, current_user.id) | {current_user.id}
+
+    if visible_ids is not None:
+        query = query.filter(models.Screenshot.user_id.in_(visible_ids))
+    if user_id is not None:
+        query = query.filter(models.Screenshot.user_id == user_id)
 
     if time_entry_id is not None:
         query = query.filter(models.Screenshot.time_entry_id == time_entry_id)

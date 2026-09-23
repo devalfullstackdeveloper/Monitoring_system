@@ -448,6 +448,11 @@ class TrackerAgent:
             if entry:
                 self.active_entry_id = entry["id"]
                 self.tracking = True
+                self._idle = bool(entry.get("is_idle", False))
+                try:
+                    self._send_heartbeat()
+                except Exception as e:
+                    print(f"Active-session heartbeat failed: {e}")
                 self._start_worker()
             else:
                 self.active_entry_id = None
@@ -566,6 +571,10 @@ class TrackerAgent:
         self.active_entry_id = resp.json()["id"]
         self.tracking = True
         self._idle = False
+        try:
+            self._send_heartbeat()
+        except Exception as e:
+            print(f"Initial heartbeat failed: {e}")
         self._start_worker()
         self._update_menu()
         self.notify(f"Tracking started (IP {ip_address})")
@@ -614,17 +623,37 @@ class TrackerAgent:
 
     def _tracking_loop(self):
         elapsed = 0
+        heartbeat_elapsed = 0
         while not self._stop_event.is_set():
             # sleep in 1s ticks so Stop reacts quickly instead of waiting a full interval
             if self._stop_event.wait(timeout=1):
                 break
             elapsed += 1
+            heartbeat_elapsed += 1
+            if heartbeat_elapsed >= 10:
+                heartbeat_elapsed = 0
+                try:
+                    self._send_heartbeat()
+                except Exception as e:
+                    print(f"Heartbeat failed: {e}")
             if elapsed >= self.screenshot_interval_seconds:
                 elapsed = 0
                 try:
                     self._capture_and_upload()
                 except Exception as e:
                     self.notify(f"Screenshot failed: {e}")
+
+    def _send_heartbeat(self):
+        resp = requests.post(
+            f"{BACKEND_URL}/time-entries/{self.active_entry_id}/heartbeat",
+            json={"is_idle": self._idle},
+            headers=self.auth_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 401:
+            self._handle_unauthorized()
+            return
+        resp.raise_for_status()
 
     def _command_loop(self):
         request_file = os.path.join(DATA_DIR, "start_tracking.request")

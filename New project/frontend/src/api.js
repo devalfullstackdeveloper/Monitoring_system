@@ -56,6 +56,15 @@ export async function createUser(payload) {
   return handle(resp);
 }
 
+export async function updateUser(userId, payload) {
+  const resp = await fetch(`${BACKEND_URL}/users/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return handle(resp);
+}
+
 export async function listTimeEntries(userId, range) {
   const url = new URL(`${BACKEND_URL}/time-entries`);
   if (userId) url.searchParams.set("user_id", userId);

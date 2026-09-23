@@ -14,6 +14,10 @@ function isAuthenticated() {
   return !!localStorage.getItem("token");
 }
 
+function getRoleLabel(role) {
+  return { superadmin: "Super Administrator", admin: "Administrator", manager: "Manager", tl: "Team Lead", user: "Employee" }[role] || role;
+}
+
 function RequireAuth({ children }) {
   return isAuthenticated() ? children : <Navigate to="/login" replace />;
 }
@@ -39,7 +43,7 @@ function Shell({ children }) {
   const userInitials = currentUser?.name
     ? currentUser.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()
     : "--";
-  const roleLabel = currentUser?.role === "admin" ? "Administrator" : "Employee";
+  const currentRoleLabel = getRoleLabel(currentUser?.role);
 
   return (
     <div className="app-shell">
@@ -56,7 +60,7 @@ function Shell({ children }) {
         </nav>
         <div className="sidebar-footer">
           <div className="admin-profile"><span className="admin-avatar">{userInitials}</span><div><strong>{currentUser?.name || "Loading..."}</strong><small>{currentUser?.email || ""}</small></div></div>
-          <div className="profile-role">{roleLabel}</div>
+          <div className="profile-role">{currentRoleLabel}</div>
           <a href="#" onClick={() => { logout(); window.location.href = "/login"; }}><span className="nav-icon">↪</span>Sign Out</a>
         </div>
       </div>

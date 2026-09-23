@@ -56,6 +56,68 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 
 def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
-    if user.role != models.UserRole.admin:
+    # Broadened on purpose: Super Admin has every Admin permission too.
+    if user.role not in (models.UserRole.superadmin, models.UserRole.admin):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user
+
+
+def require_can_manage_users(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role == models.UserRole.user:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You don't have permission to manage users")
+    return user
+
+# ---------------------------------------------------------------------
+# Role hierarchy
+# ---------------------------------------------------------------------
+
+# Which roles each role is allowed to create. A role can only ever create
+# roles strictly below it in the chain — nobody can create a peer or a
+# superior, and Users can't create anyone.
+CREATABLE_ROLES = models.ROLES_CREATABLE_BY
+
+
+def require_superadmin(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role != models.UserRole.superadmin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Admin access required")
+    return user
+
+
+def require_role(*allowed_roles: models.UserRole):
+    """Generic dependency factory: Depends(require_role(UserRole.manager, UserRole.tl))"""
+    def dependency(user: models.User = Depends(get_current_user)) -> models.User:
+        if user.role not in allowed_roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+        return user
+    return dependency
+
+
+def get_descendant_ids(db: Session, root_id: int) -> set:
+    """All user IDs anywhere below root_id in the parent chain
+    (children, grandchildren, etc. — the whole subtree), NOT including
+    root_id itself."""
+    descendants = set()
+    frontier = {root_id}
+    while frontier:
+        rows = (
+            db.query(models.User.id)
+            .filter(models.User.parent_id.in_(frontier))
+            .all()
+        )
+        next_frontier = {r[0] for r in rows} - descendants
+        if not next_frontier:
+            break
+        descendants |= next_frontier
+        frontier = next_frontier
+    return descendants
+
+
+def can_manage(db: Session, current_user: models.User, target_user_id: int) -> bool:
+    """Whether current_user is allowed to view/edit target_user_id: Super
+    Admin can manage anyone; anyone else can manage themselves and anyone
+    in their own subtree (people they created, directly or indirectly)."""
+    if current_user.role == models.UserRole.superadmin:
+        return True
+    if target_user_id == current_user.id:
+        return True
+    return target_user_id in get_descendant_ids(db, current_user.id)

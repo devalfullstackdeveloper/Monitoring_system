@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listUsers, listTimeEntries, listScreenshots, createUser } from "../api";
+import { listUsers, listTimeEntries, listScreenshots, createUser, updateUser } from "../api";
+
+const roleLabels = { admin: "Admin", manager: "Manager", tl: "Team Lead", user: "User" };
+const parentRoles = { admin: "superadmin", manager: "admin", tl: "manager", user: "tl" };
 
 function formatClock(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -45,6 +48,8 @@ function todayStr() {
   return localDay(new Date().toISOString());
 }
 
+const HEARTBEAT_TIMEOUT_MS = 30000;
+
 export default function Dashboard() {
   const navigate = useNavigate();
 
@@ -52,15 +57,19 @@ export default function Dashboard() {
   const [entries, setEntries] = useState([]);
   const [screenshots, setScreenshots] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [now, setNow] = useState(Date.now());
 
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState(todayStr());
 
   const [showAddModal, setShowAddModal] = useState(false);
-  const [newMember, setNewMember] = useState({ name: "", email: "", password: "", role: "employee" });
+  const [newMember, setNewMember] = useState({ name: "", email: "", password: "", role: "user", parent_id: "" });
   const [addError, setAddError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [updateMember, setUpdateMember] = useState({ id: "", name: "", role: "user", parent_id: "" });
+  const [updateError, setUpdateError] = useState("");
 
   async function loadAll() {
     setLoading(true);
@@ -75,7 +84,11 @@ export default function Dashboard() {
   useEffect(() => {
     loadAll();
     const interval = setInterval(loadAll, 30000); // keep live times fresh
-    return () => clearInterval(interval);
+    const clock = setInterval(() => setNow(Date.now()), 5000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(clock);
+    };
   }, []);
 
   const rows = useMemo(() => {
@@ -90,15 +103,17 @@ export default function Dashboard() {
         .sort((a, b) => new Date(b.captured_at) - new Date(a.captured_at));
       const lastShot = userShots[0];
       const lastActiveAt = activeEntry?.last_seen_at || lastShot?.captured_at || activeEntry?.start_time || userEntries[0]?.start_time;
+      const heartbeatAt = activeEntry?.last_seen_at ? new Date(activeEntry.last_seen_at).getTime() : 0;
+      const isLive = heartbeatAt > 0 && now - heartbeatAt <= HEARTBEAT_TIMEOUT_MS;
 
       let status = "offline";
-      if (activeEntry) {
+      if (activeEntry && isLive) {
         status = activeEntry.is_idle ? "idle" : "active";
       }
 
-      return { user: u, status, currentIp: activeEntry?.start_ip_address || "-", secondsToday, lastActiveAt };
+      return { user: u, status, currentIp: isLive ? activeEntry?.start_ip_address || "-" : "-", secondsToday, lastActiveAt };
     });
-  }, [users, entries, screenshots, dateFilter]);
+  }, [users, entries, screenshots, dateFilter, now]);
 
   const filteredRows = useMemo(() => {
     return rows.filter((r) => {
@@ -126,10 +141,44 @@ export default function Dashboard() {
     try {
       await createUser(newMember);
       setShowAddModal(false);
-      setNewMember({ name: "", email: "", password: "", role: "employee" });
+      setNewMember({ name: "", email: "", password: "", role: "user", parent_id: "" });
       await loadAll();
     } catch (err) {
       setAddError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function openUpdateModal() {
+    const member = users[0];
+    if (!member) return;
+    setUpdateMember({ id: member.id, name: member.name, role: member.role, parent_id: member.parent_id || "" });
+    setUpdateError("");
+    setShowUpdateModal(true);
+  }
+
+  function handleUpdateMemberSelection(e) {
+    const member = users.find((user) => user.id === Number(e.target.value));
+    if (!member) return;
+    setUpdateMember({ id: member.id, name: member.name, role: member.role, parent_id: member.parent_id || "" });
+    setUpdateError("");
+  }
+
+  async function handleUpdateMember(e) {
+    e.preventDefault();
+    setUpdateError("");
+    setSaving(true);
+    try {
+      await updateUser(updateMember.id, {
+        name: updateMember.name,
+        role: updateMember.role,
+        ...(updateMember.role !== "superadmin" ? { parent_id: Number(updateMember.parent_id) } : {}),
+      });
+      setShowUpdateModal(false);
+      await loadAll();
+    } catch (err) {
+      setUpdateError(err.message);
     } finally {
       setSaving(false);
     }
@@ -155,6 +204,7 @@ export default function Dashboard() {
             <option value="offline">Offline</option>
           </select>
           <input className="header-date" type="date" value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} aria-label="Filter by date" />
+          <button className="btn-primary" onClick={openUpdateModal}>✎ Update User</button>
           <button className="btn-primary" onClick={() => setShowAddModal(true)}>＋ Add Member</button>
         </div>
       </div>
@@ -215,7 +265,7 @@ export default function Dashboard() {
                 <td>
                   <div className="name-cell">
                     <span className={`avatar-sm avatar-${r.status}`}>{r.user.name.charAt(0).toUpperCase()}</span>
-                    <div><strong>{r.user.name}</strong><small>{r.user.role === "admin" ? "Team Admin" : "Member"}</small></div>
+                    <div><strong>{r.user.name}</strong><small>{roleLabels[r.user.role] || r.user.role}</small></div>
                   </div>
                 </td>
                 <td>{r.user.email}</td>
@@ -253,13 +303,62 @@ export default function Dashboard() {
               <label>Password</label>
               <input required type="password" value={newMember.password} onChange={(e) => setNewMember({ ...newMember, password: e.target.value })} />
               <label>Role</label>
-              <select value={newMember.role} onChange={(e) => setNewMember({ ...newMember, role: e.target.value })}>
-                <option value="employee">Employee</option>
+              <select value={newMember.role} onChange={(e) => setNewMember({ ...newMember, role: e.target.value, parent_id: "" })}>
                 <option value="admin">Admin</option>
+                <option value="manager">Manager</option>
+                <option value="tl">Team Lead</option>
+                <option value="user">User</option>
+              </select>
+              <label>Reports to</label>
+              <select required value={newMember.parent_id} onChange={(e) => setNewMember({ ...newMember, parent_id: e.target.value })}>
+                <option value="">Select {parentRoles[newMember.role]}</option>
+                {users.filter((user) => user.role === parentRoles[newMember.role]).map((user) => (
+                  <option key={user.id} value={user.id}>{user.name} ({user.email})</option>
+                ))}
               </select>
               <div className="modal-actions">
                 <button type="button" className="btn-secondary" onClick={() => setShowAddModal(false)}>Cancel</button>
                 <button type="submit" className="btn-primary" disabled={saving}>{saving ? "Adding..." : "Add Member"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showUpdateModal && (
+        <div className="modal-overlay" onClick={() => setShowUpdateModal(false)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <h3>Update User</h3>
+            {updateError && <div className="alert-error">{updateError}</div>}
+            <form onSubmit={handleUpdateMember}>
+              <label>User</label>
+              <select value={updateMember.id} onChange={handleUpdateMemberSelection}>
+                {users.map((user) => <option key={user.id} value={user.id}>{user.name} ({user.email})</option>)}
+              </select>
+              <label>Name</label>
+              <input required value={updateMember.name} onChange={(e) => setUpdateMember({ ...updateMember, name: e.target.value })} />
+              <label>Role</label>
+              <select value={updateMember.role} onChange={(e) => setUpdateMember({ ...updateMember, role: e.target.value, parent_id: "" })}>
+                <option value="superadmin">Super Administrator</option>
+                <option value="admin">Admin</option>
+                <option value="manager">Manager</option>
+                <option value="tl">Team Lead</option>
+                <option value="user">User</option>
+              </select>
+              {updateMember.role !== "superadmin" && (
+                <>
+                  <label>Reports to</label>
+                  <select required value={updateMember.parent_id} onChange={(e) => setUpdateMember({ ...updateMember, parent_id: e.target.value })}>
+                    <option value="">Select {parentRoles[updateMember.role]}</option>
+                    {users.filter((user) => user.id !== updateMember.id && user.role === parentRoles[updateMember.role]).map((user) => (
+                      <option key={user.id} value={user.id}>{user.name} ({user.email})</option>
+                    ))}
+                  </select>
+                </>
+              )}
+              <div className="modal-actions">
+                <button type="button" className="btn-secondary" onClick={() => setShowUpdateModal(false)}>Cancel</button>
+                <button type="submit" className="btn-primary" disabled={saving}>{saving ? "Updating..." : "Update User"}</button>
               </div>
             </form>
           </div>

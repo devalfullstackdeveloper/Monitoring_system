@@ -10,8 +10,29 @@ from .database import Base
 
 
 class UserRole(str, enum.Enum):
+    superadmin = "superadmin"
     admin = "admin"
-    employee = "employee"
+    manager = "manager"
+    tl = "tl"
+    user = "user"
+
+
+ROLE_HIERARCHY = {
+    UserRole.superadmin: None,
+    UserRole.admin: UserRole.superadmin,
+    UserRole.manager: UserRole.admin,
+    UserRole.tl: UserRole.manager,
+    UserRole.user: UserRole.tl,
+}
+
+
+ROLES_CREATABLE_BY = {
+    UserRole.superadmin: {UserRole.admin, UserRole.manager, UserRole.tl, UserRole.user},
+    UserRole.admin: {UserRole.manager, UserRole.tl, UserRole.user},
+    UserRole.manager: {UserRole.tl, UserRole.user},
+    UserRole.tl: {UserRole.user},
+    UserRole.user: set(),
+}
 
 
 class User(Base):
@@ -21,9 +42,12 @@ class User(Base):
     name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
-    role = Column(Enum(UserRole), default=UserRole.employee, nullable=False)
+    role = Column(Enum(UserRole), default=UserRole.user, nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    parent_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    parent = relationship("User", remote_side=[id], backref="direct_reports")
 
     time_entries = relationship("TimeEntry", back_populates="user")
 
