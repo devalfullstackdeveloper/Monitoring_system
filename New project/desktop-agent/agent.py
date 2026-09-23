@@ -36,6 +36,7 @@ import pystray
 from pystray import MenuItem as Item
 
 from media_activity import is_foreground_media_playing
+from mouse_pattern_detector import MousePatternDetector
 
 from config import (
     BACKEND_URL,
@@ -115,8 +116,14 @@ def prompt_login_gui(error_message=None):
 class ActivityMonitor:
     """Track mouse, keyboard, and Windows system input activity."""
 
-    def __init__(self, on_idle_change, timeout_seconds=IDLE_TIMEOUT_SECONDS):
+    def __init__(
+        self,
+        on_idle_change,
+        timeout_seconds=IDLE_TIMEOUT_SECONDS,
+        on_pattern_change=None,
+    ):
         self._on_idle_change = on_idle_change
+        self._on_pattern_change = on_pattern_change
         self._timeout_seconds = timeout_seconds
         self._last_activity = time.monotonic()
         self._last_media_check = 0.0
@@ -126,6 +133,8 @@ class ActivityMonitor:
         self._thread = None
         self._mouse_listener = None
         self._keyboard_listener = None
+        self._pattern_detector = MousePatternDetector()
+        self._pattern_detected = False
 
         # Windows system-input tracking
         self._last_system_input = self._get_system_input_time()
@@ -166,16 +175,18 @@ class ActivityMonitor:
             self._last_activity = time.monotonic()
             self._last_media_check = 0.0
             self._idle = False
+            self._pattern_detector.reset()
+            self._pattern_detected = False
             self._stop_event.clear()
             # Reset Windows input timestamp when monitoring starts.
             self._last_system_input = self._get_system_input_time()
             self._mouse_listener = mouse.Listener(
-                on_move=self._activity,
-                on_click=self._activity,
-                on_scroll=self._activity,
+                on_move=self._on_mouse_move,
+                on_click=self._on_other_input,
+                on_scroll=self._on_other_input,
             )
             self._keyboard_listener = keyboard.Listener(
-                on_press=self._activity
+                on_press=self._on_other_input
             )
             self._mouse_listener.start()
             self._keyboard_listener.start()
@@ -212,6 +223,14 @@ class ActivityMonitor:
 
         if became_active:
             self._on_idle_change(False)
+
+    def _on_mouse_move(self, *args):
+        self._pattern_detector.record_mouse_move()
+        self._activity()
+
+    def _on_other_input(self, *args):
+        self._pattern_detector.record_other_input()
+        self._activity()
 
     def _check_windows_input(self):
         """
@@ -253,6 +272,11 @@ class ActivityMonitor:
                 if is_foreground_media_playing():
                     self._activity()
                     continue
+            pattern_detected = self._pattern_detector.is_automated_pattern()
+            if pattern_detected != self._pattern_detected:
+                self._pattern_detected = pattern_detected
+                if self._on_pattern_change:
+                    self._on_pattern_change(pattern_detected)
             became_idle = False
             with self._state_lock:
                 timeout = self._timeout_seconds
@@ -278,6 +302,7 @@ class TrackerAgent:
         self._activity_monitor = None
         self._idle = False
         self._resume_after_idle = False
+        self._stopped_due_to_pattern = False
         self._settings_thread = None
         self.icon = None
         self.screenshot_interval_seconds = SCREENSHOT_INTERVAL_SECONDS
@@ -494,7 +519,11 @@ class TrackerAgent:
 
     def _start_activity_monitor(self):
         if not self._activity_monitor:
-            self._activity_monitor = ActivityMonitor(self._handle_idle_change, self.idle_timeout_seconds)
+            self._activity_monitor = ActivityMonitor(
+                self._handle_idle_change,
+                self.idle_timeout_seconds,
+                self._handle_pattern_change,
+            )
         else:
             self._activity_monitor.set_timeout(self.idle_timeout_seconds)
         self._activity_monitor.start()
@@ -513,6 +542,25 @@ class TrackerAgent:
             self._resume_after_idle = False
             self.start_tracking()
             self.notify("Activity detected. Tracking resumed.")
+
+    def _handle_pattern_change(self, detected):
+        if detected:
+            if self.tracking and not self._stopped_due_to_pattern:
+                self._stopped_due_to_pattern = True
+                entry_id = self.active_entry_id
+                self._stop_tracking(notify_user=False, preserve_for_idle=True)
+                self.notify(
+                    f"Tracking paused because automated mouse movement was detected "
+                    f"(session #{entry_id})."
+                )
+            return
+
+        if self._stopped_due_to_pattern:
+            self._stopped_due_to_pattern = False
+            if self._resume_after_idle and not self.tracking:
+                self._resume_after_idle = False
+                self.start_tracking()
+                self.notify("Automated mouse movement ended. Tracking resumed.")
 
     def start_tracking(self, icon=None, item=None):
         if not self._start_lock.acquire(blocking=False):
@@ -586,7 +634,10 @@ class TrackerAgent:
         if not self.tracking:
             if not preserve_for_idle:
                 self._resume_after_idle = False
+                self._stopped_due_to_pattern = False
             return
+        if not preserve_for_idle:
+            self._stopped_due_to_pattern = False
         self._resume_after_idle = preserve_for_idle
         self.tracking = False
         self._stop_event.set()
