@@ -385,6 +385,14 @@ class TrackerAgent:
         self.screenshot_interval_seconds = SCREENSHOT_INTERVAL_SECONDS
         self.idle_timeout_seconds = IDLE_TIMEOUT_SECONDS
 
+    def _log(self, message):
+        print(message)
+        try:
+            with open(os.path.join(DATA_DIR, "agent.log"), "a", encoding="utf-8") as log:
+                log.write(f"{datetime.now(timezone.utc).isoformat()} {message}\n")
+        except OSError:
+            pass
+
     # ---------- Notifications ----------
 
     def notify(self, message, title="Org Tracker"):
@@ -503,7 +511,7 @@ class TrackerAgent:
             new_interval = data.get("screenshot_interval_seconds")
             if isinstance(new_interval, int) and new_interval > 0:
                 if new_interval != self.screenshot_interval_seconds:
-                    print(f"Screenshot interval updated: {self.screenshot_interval_seconds}s -> {new_interval}s")
+                    self._log(f"Screenshot interval updated: {self.screenshot_interval_seconds}s -> {new_interval}s")
                 self.screenshot_interval_seconds = new_interval
 
             new_idle_timeout = data.get("idle_timeout_seconds")
@@ -514,9 +522,9 @@ class TrackerAgent:
                 if self._activity_monitor:
                     self._activity_monitor.set_timeout(new_idle_timeout)
         except requests.exceptions.RequestException as e:
-            print(f"Could not refresh settings ({e.__class__.__name__}); keeping current interval.")
+            self._log(f"Could not refresh settings ({e.__class__.__name__}); keeping current interval.")
         except Exception as e:
-            print(f"Unexpected error refreshing settings: {e}")
+            self._log(f"Unexpected error refreshing settings: {e}")
 
     def _settings_loop(self):
         while True:
@@ -743,16 +751,31 @@ class TrackerAgent:
 
     def _tracking_loop(self):
         elapsed = 0
+        heartbeat_elapsed = 0
         while not self._stop_event.is_set():
             # sleep in 1s ticks so Stop reacts quickly instead of waiting a full interval
             if self._stop_event.wait(timeout=1):
                 break
             elapsed += 1
+            heartbeat_elapsed += 1
+            if heartbeat_elapsed >= 10 and self.active_entry_id:
+                heartbeat_elapsed = 0
+                try:
+                    response = requests.post(
+                        f"{BACKEND_URL}/time-entries/{self.active_entry_id}/heartbeat",
+                        json={"is_idle": False},
+                        headers=self.auth_headers(),
+                        timeout=10,
+                    )
+                    response.raise_for_status()
+                except requests.exceptions.RequestException as exc:
+                    self._log(f"Heartbeat failed: {exc}")
             if elapsed >= self.screenshot_interval_seconds:
                 elapsed = 0
                 try:
                     self._capture_and_upload()
                 except Exception as e:
+                    self._log(f"Screenshot failed: {type(e).__name__}: {e}")
                     self.notify(f"Screenshot failed: {e}")
 
     def _command_loop(self):
@@ -769,6 +792,8 @@ class TrackerAgent:
 
     def _capture_and_upload(self):
         image_bytes = self.capture_screenshot_bytes()
+        if not image_bytes:
+            raise RuntimeError("Screen capture returned no image data")
         ip_address = self.get_system_ip()
         self._drain_pending_uploads()
         files = {"file": (f"shot_{int(time.time())}.jpg", image_bytes, "image/jpeg")}
@@ -858,8 +883,10 @@ class TrackerAgent:
             print("Org Tracker is already running.")
             return
         self.load_token()
-        if SILENT_MODE and self.token and not self.validate_token():
-            return
+        if self.token and not self.validate_token():
+            # Expired tokens must fall back to the login window even when the
+            # agent normally runs without a console.
+            self.delete_token()
         if not self.token:
             self.login()
 
