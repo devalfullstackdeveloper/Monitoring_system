@@ -56,6 +56,42 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 
 def require_admin(user: models.User = Depends(get_current_user)) -> models.User:
-    if user.role != models.UserRole.admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    if user.role not in (models.UserRole.super_admin, models.UserRole.admin):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required")
     return user
+
+
+def require_super_admin(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role != models.UserRole.super_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super admin access required")
+    return user
+
+
+def require_manager_or_above(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role not in (
+        models.UserRole.super_admin,
+        models.UserRole.admin,
+        models.UserRole.manager,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager access required")
+    return user
+
+
+def visible_user_filter(query, current_user: models.User):
+    """Limit organization data to the caller's permitted team boundary."""
+    if current_user.role == models.UserRole.super_admin:
+        return query
+    if current_user.role == models.UserRole.admin:
+        return query.filter(
+            models.User.organization_id == current_user.organization_id,
+            models.User.role != models.UserRole.super_admin,
+        )
+    if current_user.role == models.UserRole.manager:
+        visible_ids = {current_user.id}
+        frontier = [current_user.id]
+        while frontier:
+            child_ids = [row[0] for row in query.session.query(models.User.id).filter(models.User.manager_id.in_(frontier)).all()]
+            frontier = [child_id for child_id in child_ids if child_id not in visible_ids]
+            visible_ids.update(frontier)
+        return query.filter(models.User.id.in_(visible_ids))
+    return query.filter(models.User.id == current_user.id)

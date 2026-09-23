@@ -25,7 +25,7 @@ def main():
         name=name,
         email=email,
         hashed_password=hash_password(password),
-        role=models.UserRole.admin,
+        role=models.UserRole.super_admin,
     )
     db.add(admin)
     db.commit()

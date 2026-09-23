@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional 
 from pydantic import BaseModel, EmailStr, Field, field_serializer
  
-from .models import UserRole, TimeEntryStatus
+from .models import AlertSeverity, AlertStatus, UserRole, TimeEntryStatus
  
  
 def _as_utc_iso(dt: Optional[datetime]) -> Optional[str]:
@@ -31,6 +31,18 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     role: UserRole = UserRole.employee
+    organization_id: Optional[int] = None
+    manager_id: Optional[int] = None
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(default=None, min_length=12)
+    role: Optional[UserRole] = None
+    organization_id: Optional[int] = None
+    manager_id: Optional[int] = None
+    is_active: Optional[bool] = None
  
  
 class UserOut(BaseModel):
@@ -38,8 +50,68 @@ class UserOut(BaseModel):
     name: str
     email: EmailStr
     role: UserRole
+    organization_id: Optional[int] = None
+    manager_id: Optional[int] = None
     is_active: bool
  
+    class Config:
+        from_attributes = True
+
+
+class OrganizationCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+
+
+class OrganizationOut(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=20)
+    password: str = Field(min_length=12)
+
+
+class ConsentCreate(BaseModel):
+    policy_version: str = Field(min_length=1, max_length=40)
+
+
+class ConsentOut(BaseModel):
+    id: int
+    user_id: int
+    organization_id: Optional[int]
+    policy_version: str
+    accepted_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AlertCreate(BaseModel):
+    alert_type: str = Field(min_length=1, max_length=80)
+    severity: AlertSeverity = AlertSeverity.warning
+    message: str = Field(min_length=1, max_length=500)
+    evidence: Optional[dict] = None
+
+
+class AlertOut(BaseModel):
+    id: int
+    user_id: int
+    alert_type: str
+    severity: AlertSeverity
+    status: AlertStatus
+    message: str
+    evidence: Optional[dict]
+    created_at: datetime
+    acknowledged_at: Optional[datetime]
+
     class Config:
         from_attributes = True
  
@@ -113,6 +185,8 @@ class ScreenshotOut(BaseModel):
 class SettingsOut(BaseModel):
     screenshot_interval_seconds: int
     idle_timeout_seconds: int
+    retention_days: int
+    screenshot_masking_enabled: bool
 
     class Config:
         from_attributes = True
@@ -121,3 +195,5 @@ class SettingsOut(BaseModel):
 class SettingsUpdate(BaseModel):
     screenshot_interval_seconds: int = Field(ge=30, le=3600)
     idle_timeout_seconds: int = Field(ge=30, le=3600)
+    retention_days: int = Field(default=90, ge=1, le=3650)
+    screenshot_masking_enabled: bool = False

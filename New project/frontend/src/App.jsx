@@ -7,6 +7,7 @@ import EmployeeDetail from "./pages/EmployeeDetail.jsx";
 import EmployeeScreenshots from "./pages/EmployeeScreenshots.jsx";
 import Timesheets from "./pages/Timesheets.jsx";
 import Screenshots from "./pages/Screenshots.jsx";
+import Alerts from "./pages/Alerts.jsx";
 import { getCurrentUser, logout } from "./api";
 import logo from "./assets/org-tracker-logo.svg";
 
@@ -24,6 +25,7 @@ function NavIcon({ type }) {
     timesheets: <><circle cx="8" cy="8" r="5" /><path d="M8 5v3l2 1" /></>,
     screenshots: <><rect x="2" y="3" width="12" height="8" rx="1" /><path d="M5 14h6M8 11v3" /></>,
     management: <><path d="M8 2.5 9.2 3l1.4-.5 1.1 1.1-.5 1.4.5 1.2 1.3.7v1.6l-1.3.7-.5 1.2.5 1.4-1.1 1.1-1.4-.5-1.2.5-.7 1.3H6.7L6 12.9l-1.2-.5-1.4.5-1.1-1.1.5-1.4-.5-1.2L1 8.5V6.9l1.3-.7.5-1.2-.5-1.4 1.1-1.1 1.4.5L6 2.5l.7-1.3h1.6z" /><circle cx="7.5" cy="7.7" r="2" /></>,
+    alerts: <><path d="M8 2.5a4 4 0 0 1 4 4v2l1.3 2H2.7L4 8.5v-2a4 4 0 0 1 4-4Z" /><path d="M6.5 13.5h3" /></>,
   };
 
   return <svg className={`nav-icon${type === "management" ? " management-icon" : ""}`} viewBox="0 0 16 16" aria-hidden="true">{paths[type]}</svg>;
@@ -39,7 +41,7 @@ function Shell({ children }) {
   const userInitials = currentUser?.name
     ? currentUser.name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()
     : "--";
-  const roleLabel = currentUser?.role === "admin" ? "Administrator" : "Employee";
+  const roleLabel = currentUser?.role === "super_admin" ? "Super Admin" : currentUser?.role === "admin" ? "Administrator" : currentUser?.role === "manager" ? "Manager" : "Employee";
 
   return (
     <div className="app-shell">
@@ -52,6 +54,7 @@ function Shell({ children }) {
           <NavLink to="/"><NavIcon type="dashboard" />Dashboard</NavLink>
           <NavLink to="/timesheets"><NavIcon type="timesheets" />Timesheets</NavLink>
           <NavLink to="/screenshots"><NavIcon type="screenshots" />Screenshots</NavLink>
+          {(currentUser?.role === "super_admin" || currentUser?.role === "admin" || currentUser?.role === "manager") && <NavLink to="/alerts"><NavIcon type="alerts" />Security Alerts</NavLink>}
           <NavLink className="management-link" to="/tracker-management"><NavIcon type="management" />Tracker Management</NavLink>
         </nav>
         <div className="sidebar-footer">
@@ -117,6 +120,10 @@ export default function App() {
               <Shell><Screenshots /></Shell>
             </RequireAuth>
           }
+        />
+        <Route
+          path="/alerts"
+          element={<RequireAuth><Shell><Alerts /></Shell></RequireAuth>}
         />
       </Routes>
     </BrowserRouter>

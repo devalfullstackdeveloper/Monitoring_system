@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listUsers, listTimeEntries, listScreenshots, createUser } from "../api";
+import { getCurrentUser, listUsers, listTimeEntries, listScreenshots, createUser, updateUser, listOrganizations, createOrganization } from "../api";
 
 function formatClock(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -58,9 +58,14 @@ export default function Dashboard() {
   const [dateFilter, setDateFilter] = useState(todayStr());
 
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
   const [newMember, setNewMember] = useState({ name: "", email: "", password: "", role: "employee" });
   const [addError, setAddError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [organizations, setOrganizations] = useState([]);
+  const [organizationName, setOrganizationName] = useState("");
+  const [organizationError, setOrganizationError] = useState("");
 
   async function loadAll() {
     setLoading(true);
@@ -73,6 +78,10 @@ export default function Dashboard() {
   }
 
   useEffect(() => {
+    Promise.all([getCurrentUser(), listOrganizations()]).then(([user, orgs]) => {
+      setCurrentUser(user);
+      setOrganizations(orgs);
+    }).catch(() => {});
     loadAll();
     const interval = setInterval(loadAll, 30000); // keep live times fresh
     return () => clearInterval(interval);
@@ -133,6 +142,61 @@ export default function Dashboard() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleEditMember(e) {
+    e.preventDefault();
+    setAddError("");
+    setSaving(true);
+    try {
+      await updateUser(editingUser.id, {
+        name: editingUser.name,
+        email: editingUser.email,
+        role: editingUser.role,
+        organization_id: editingUser.organization_id,
+        manager_id: editingUser.manager_id,
+        is_active: editingUser.is_active,
+      });
+      setEditingUser(null);
+      await loadAll();
+    } catch (err) {
+      setAddError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCreateOrganization(e) {
+    e.preventDefault();
+    setOrganizationError("");
+    try {
+      const organization = await createOrganization(organizationName);
+      setOrganizations((items) => [...items, organization]);
+      setOrganizationName("");
+    } catch (err) {
+      setOrganizationError(err.message);
+    }
+  }
+
+  const roleOptions = currentUser?.role === "super_admin"
+    ? ["employee", "manager", "admin", "super_admin"]
+    : currentUser?.role === "admin"
+      ? ["employee", "manager", "admin"]
+      : ["employee"];
+
+  function updateEditingUser(field, value) {
+    setEditingUser((user) => {
+      const updated = { ...user, [field]: value };
+      if (field === "role" && value === "super_admin") {
+        updated.organization_id = null;
+        updated.manager_id = null;
+      }
+      if (field === "organization_id" && updated.manager_id) {
+        const manager = users.find((candidate) => candidate.id === updated.manager_id);
+        if (!manager || manager.organization_id !== value) updated.manager_id = null;
+      }
+      return updated;
+    });
   }
 
   return (
@@ -215,7 +279,7 @@ export default function Dashboard() {
                 <td>
                   <div className="name-cell">
                     <span className={`avatar-sm avatar-${r.status}`}>{r.user.name.charAt(0).toUpperCase()}</span>
-                    <div><strong>{r.user.name}</strong><small>{r.user.role === "admin" ? "Team Admin" : "Member"}</small></div>
+                    <div><strong>{r.user.name}</strong><small>{r.user.role === "super_admin" ? "Super Admin" : r.user.role === "admin" ? "Team Admin" : r.user.role === "manager" ? "Manager" : "Member"}</small></div>
                   </div>
                 </td>
                 <td>{r.user.email}</td>
@@ -229,6 +293,7 @@ export default function Dashboard() {
                 <td>{timeAgo(r.lastActiveAt)}</td>
                 <td>
                   <button className="btn-view" onClick={() => navigate(`/employee/${r.user.id}`)}>View</button>
+                  {currentUser?.role !== "employee" && <button className="btn-view" onClick={() => { setAddError(""); setEditingUser({ ...r.user }); }}>Edit</button>}
                 </td>
               </tr>
             ))}
@@ -254,15 +319,43 @@ export default function Dashboard() {
               <input required type="password" value={newMember.password} onChange={(e) => setNewMember({ ...newMember, password: e.target.value })} />
               <label>Role</label>
               <select value={newMember.role} onChange={(e) => setNewMember({ ...newMember, role: e.target.value })}>
-                <option value="employee">Employee</option>
-                <option value="admin">Admin</option>
+                {roleOptions.map((role) => <option key={role} value={role}>{role.replace("_", " ")}</option>)}
               </select>
+              {organizations.length > 0 && <><label>Organization</label><select value={newMember.organization_id || ""} onChange={(e) => setNewMember({ ...newMember, organization_id: e.target.value ? Number(e.target.value) : null })}><option value="">Use my organization</option>{organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></>}
+              {newMember.role === "employee" && <><label>Manager</label><select value={newMember.manager_id || ""} onChange={(e) => setNewMember({ ...newMember, manager_id: e.target.value ? Number(e.target.value) : null })}><option value="">No manager assigned</option>{users.filter((user) => user.role === "manager" && (!newMember.organization_id || user.organization_id === newMember.organization_id)).map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></>}
               <div className="modal-actions">
                 <button type="button" className="btn-secondary" onClick={() => setShowAddModal(false)}>Cancel</button>
                 <button type="submit" className="btn-primary" disabled={saving}>{saving ? "Adding..." : "Add Member"}</button>
               </div>
             </form>
           </div>
+        </div>
+      )}
+      {editingUser && (
+        <div className="modal-overlay" onClick={() => setEditingUser(null)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <h3>Edit User</h3>
+            {addError && <div className="alert-error">{addError}</div>}
+            <form onSubmit={handleEditMember}>
+              <label>Name</label><input required value={editingUser.name} onChange={(e) => setEditingUser({ ...editingUser, name: e.target.value })} />
+              <label>Email</label><input required type="email" value={editingUser.email} onChange={(e) => setEditingUser({ ...editingUser, email: e.target.value })} />
+              <label>Role</label><select value={editingUser.role} onChange={(e) => updateEditingUser("role", e.target.value)}>{roleOptions.map((role) => <option key={role} value={role}>{role.replace("_", " ")}</option>)}</select>
+              {editingUser.role !== "super_admin" && organizations.length > 0 && <><label>Organization</label><select value={editingUser.organization_id || ""} onChange={(e) => updateEditingUser("organization_id", e.target.value ? Number(e.target.value) : null)}><option value="">Select organization</option>{organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></>}
+              {editingUser.role === "employee" && <><label>Manager</label><select value={editingUser.manager_id || ""} onChange={(e) => updateEditingUser("manager_id", e.target.value ? Number(e.target.value) : null)}><option value="">No manager</option>{users.filter((user) => user.role === "manager" && user.id !== editingUser.id && user.organization_id === editingUser.organization_id).map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></>}
+              <label className="profile-row"><span>Active account</span><input type="checkbox" checked={editingUser.is_active} onChange={(e) => setEditingUser({ ...editingUser, is_active: e.target.checked })} /></label>
+              <div className="modal-actions"><button type="button" className="btn-secondary" onClick={() => setEditingUser(null)}>Cancel</button><button type="submit" className="btn-primary" disabled={saving}>{saving ? "Saving..." : "Save Changes"}</button></div>
+            </form>
+          </div>
+        </div>
+      )}
+      {currentUser?.role === "super_admin" && (
+        <div className="card organization-create-card">
+          <h3>Create Organization</h3>
+          {organizationError && <div className="alert-error">{organizationError}</div>}
+          <form onSubmit={handleCreateOrganization} className="inline-form">
+            <input required value={organizationName} onChange={(e) => setOrganizationName(e.target.value)} placeholder="Organization name" />
+            <button className="btn-primary" type="submit">Create</button>
+          </form>
         </div>
       )}
     </div>

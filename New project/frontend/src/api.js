@@ -56,6 +56,15 @@ export async function createUser(payload) {
   return handle(resp);
 }
 
+export async function updateUser(userId, payload) {
+  const resp = await fetch(`${BACKEND_URL}/users/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return handle(resp);
+}
+
 export async function listTimeEntries(userId, range) {
   const url = new URL(`${BACKEND_URL}/time-entries`);
   if (userId) url.searchParams.set("user_id", userId);
@@ -97,11 +106,41 @@ export async function updateSettings(payload) {
 }
 
 export function screenshotUrl(filePath) {
-  // backend serves the storage dir at /media/screenshots
-  // normalize Windows backslashes to forward slashes before matching
-  const normalized = filePath.replace(/\\/g, "/");
-  const marker = "storage/screenshots/";
-  const idx = normalized.indexOf(marker);
-  const relative = idx >= 0 ? normalized.slice(idx + marker.length) : normalized;
+  // Backend storage can be configured as a local path or Docker's /data path.
+  const normalized = (filePath || "").replace(/\\/g, "/");
+  const markers = ["storage/screenshots/", "data/screenshots/"];
+  const marker = markers.find((candidate) => normalized.includes(candidate));
+  const relative = marker
+    ? normalized.slice(normalized.lastIndexOf(marker) + marker.length)
+    : normalized.replace(/^\/+/, "");
   return `${BACKEND_URL}/media/screenshots/${relative}`;
+}
+
+export async function listAlerts(status) {
+  const url = new URL(`${BACKEND_URL}/alerts`);
+  if (status) url.searchParams.set("status", status);
+  const resp = await fetch(url, { headers: authHeaders() });
+  return handle(resp);
+}
+
+export async function acknowledgeAlert(alertId) {
+  const resp = await fetch(`${BACKEND_URL}/alerts/${alertId}/acknowledge`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handle(resp);
+}
+
+export async function listOrganizations() {
+  const resp = await fetch(`${BACKEND_URL}/organizations`, { headers: authHeaders() });
+  return handle(resp);
+}
+
+export async function createOrganization(name) {
+  const resp = await fetch(`${BACKEND_URL}/organizations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ name }),
+  });
+  return handle(resp);
 }

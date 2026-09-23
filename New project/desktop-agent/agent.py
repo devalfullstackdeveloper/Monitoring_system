@@ -20,10 +20,12 @@ import io
 import json
 import os
 import socket
+import statistics
 import sys
 import threading
 import time
 import traceback
+from collections import deque
 from datetime import datetime, timezone
 from getpass import getpass
 from pynput import keyboard, mouse
@@ -35,7 +37,12 @@ from PIL import Image
 import pystray
 from pystray import MenuItem as Item
 
+from activity_detection import get_foreground_activity_details
 from media_activity import is_foreground_media_playing
+from system_state import (
+    get_system_uptime_milliseconds,
+    is_workstation_locked,
+)
 
 from config import (
     BACKEND_URL,
@@ -43,11 +50,37 @@ from config import (
     DATA_DIR,
     SCREENSHOT_INTERVAL_SECONDS,
     IDLE_TIMEOUT_SECONDS,
+    LONG_RUNNING_ACTIVITY_DETECTION_ENABLED,
     MEDIA_ACTIVITY_DETECTION_ENABLED,
     MEDIA_CHECK_INTERVAL_SECONDS,
     SCREENSHOT_NOTIFICATIONS_ENABLED,
+    SILENT_MODE,
+    SYSTEM_STATE_DETECTION_ENABLED,
     TOKEN_FILE,
 )
+
+
+_INSTANCE_MUTEX = None
+
+
+def _acquire_single_instance():
+    """Allow only one agent process per Windows user session."""
+    global _INSTANCE_MUTEX
+    if sys.platform != "win32":
+        return True
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.GetLastError.restype = ctypes.c_ulong
+        _INSTANCE_MUTEX = kernel32.CreateMutexW(
+            None, False, "Local\\OrgTrackerDesktopAgent"
+        )
+        if not _INSTANCE_MUTEX:
+            return True
+        return ctypes.get_last_error() != 183
+    except Exception:
+        return True
 
 
 def _has_display():
@@ -113,48 +146,45 @@ def prompt_login_gui(error_message=None):
 
 
 class ActivityMonitor:
-    """Track mouse, keyboard, and Windows system input activity."""
+    """Track mouse and keyboard activity through one monitor per input type."""
 
-    def __init__(self, on_idle_change, timeout_seconds=IDLE_TIMEOUT_SECONDS):
+    def __init__(self, on_idle_change, on_signal=None, timeout_seconds=IDLE_TIMEOUT_SECONDS):
         self._on_idle_change = on_idle_change
+        self._on_signal = on_signal or (lambda *_args, **_kwargs: None)
         self._timeout_seconds = timeout_seconds
         self._last_activity = time.monotonic()
         self._last_media_check = 0.0
+        self._last_system_uptime = get_system_uptime_milliseconds()
+        self._system_blocked = False
         self._idle = False
         self._stop_event = threading.Event()
         self._state_lock = threading.Lock()
         self._thread = None
         self._mouse_listener = None
         self._keyboard_listener = None
+        self._mouse_events = deque(maxlen=60)
+        self._keyboard_events = deque(maxlen=60)
+        self._last_jiggler_signal = 0.0
 
-        # Windows system-input tracking
         self._last_system_input = self._get_system_input_time()
-        
+
     @staticmethod
     def _get_system_input_time():
-        """
-        Get the time of the last user input reported by Windows.
-
-        This acts as an additional activity source for things such as
-        Precision Touchpad gestures that may not reach pynput's
-        on_scroll callback.
-        """
         if sys.platform != "win32":
             return None
+
         class LASTINPUTINFO(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", ctypes.c_uint),
-                ("dwTime", ctypes.c_uint),
-            ]
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
         info = LASTINPUTINFO()
         info.cbSize = ctypes.sizeof(LASTINPUTINFO)
-
         try:
             if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
                 return info.dwTime
         except Exception:
             pass
         return None
+
     def set_timeout(self, timeout_seconds):
         with self._state_lock:
             self._timeout_seconds = timeout_seconds
@@ -165,38 +195,28 @@ class ActivityMonitor:
                 return
             self._last_activity = time.monotonic()
             self._last_media_check = 0.0
+            self._last_system_uptime = get_system_uptime_milliseconds()
+            self._system_blocked = False
+            self._last_system_input = self._get_system_input_time()
             self._idle = False
             self._stop_event.clear()
-            # Reset Windows input timestamp when monitoring starts.
-            self._last_system_input = self._get_system_input_time()
             self._mouse_listener = mouse.Listener(
-                on_move=self._activity,
+                on_move=self._mouse_activity,
                 on_click=self._activity,
                 on_scroll=self._activity,
             )
-            self._keyboard_listener = keyboard.Listener(
-                on_press=self._activity
-            )
+            self._keyboard_listener = keyboard.Listener(on_press=self._keyboard_activity)
             self._mouse_listener.start()
             self._keyboard_listener.start()
-            self._thread = threading.Thread(
-                target=self._run,
-                daemon=True
-            )
+            self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
     def stop(self):
         self._stop_event.set()
-        for listener in (
-            self._mouse_listener,
-            self._keyboard_listener
-        ):
+        for listener in (self._mouse_listener, self._keyboard_listener):
             if listener:
                 listener.stop()
-        if (
-            self._thread
-            and self._thread is not threading.current_thread()
-        ):
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
         self._mouse_listener = None
         self._keyboard_listener = None
@@ -205,6 +225,8 @@ class ActivityMonitor:
     def _activity(self, *args):
         became_active = False
         with self._state_lock:
+            if self._system_blocked:
+                return
             self._last_activity = time.monotonic()
             if self._idle:
                 self._idle = False
@@ -212,6 +234,33 @@ class ActivityMonitor:
 
         if became_active:
             self._on_idle_change(False)
+
+    def _mouse_activity(self, *args):
+        self._mouse_events.append(time.monotonic())
+        self._activity(*args)
+
+    def _keyboard_activity(self, *args):
+        self._keyboard_events.append(time.monotonic())
+        self._activity(*args)
+
+    def _check_mouse_jiggler(self, now):
+        if len(self._mouse_events) < 8 or now - self._last_jiggler_signal < 300:
+            return
+        events = list(self._mouse_events)
+        recent = [event for event in events if now - event <= 60]
+        if len(recent) < 8:
+            return
+        intervals = [right - left for left, right in zip(events[-8:], events[-7:])]
+        mean_interval = statistics.mean(intervals)
+        deviation = statistics.pstdev(intervals)
+        has_no_keyboard = not self._keyboard_events or now - self._keyboard_events[-1] > 60
+        if has_no_keyboard and 1.0 <= mean_interval <= 15.0 and deviation <= 0.2:
+            self._last_jiggler_signal = now
+            self._on_signal(
+                "possible_input_simulator",
+                "Pointer input has an unusually regular pattern without keyboard activity.",
+                {"events_last_60_seconds": len(recent), "mean_interval_seconds": round(mean_interval, 3), "interval_deviation": round(deviation, 3)},
+            )
 
     def _check_windows_input(self):
         """
@@ -225,6 +274,9 @@ class ActivityMonitor:
 
         with self._state_lock:
             previous_input = self._last_system_input
+            if self._system_blocked:
+                self._last_system_input = current_input
+                return
             if (
                 previous_input is not None
                 and current_input != previous_input
@@ -241,25 +293,75 @@ class ActivityMonitor:
         if became_active:
             self._on_idle_change(False)
 
+    def _check_system_state(self):
+        if not SYSTEM_STATE_DETECTION_ENABLED:
+            return False
+
+        current_uptime = get_system_uptime_milliseconds()
+        resumed_from_sleep = (
+            current_uptime is not None
+            and self._last_system_uptime is not None
+            and current_uptime - self._last_system_uptime >= 5000
+        )
+        self._last_system_uptime = current_uptime
+        blocked = is_workstation_locked() or resumed_from_sleep
+
+        if blocked:
+            became_idle = False
+            with self._state_lock:
+                self._system_blocked = True
+                if not self._idle:
+                    self._idle = True
+                    became_idle = True
+            if became_idle:
+                self._on_idle_change(True)
+            return True
+
+        with self._state_lock:
+            self._system_blocked = False
+        return False
+
     def _run(self):
         while not self._stop_event.wait(1):
             now = time.monotonic()
 
+            if self._check_system_state():
+                continue
+
+            self._check_windows_input()
+            self._check_mouse_jiggler(now)
+
             if (
-                MEDIA_ACTIVITY_DETECTION_ENABLED
+                (
+                    MEDIA_ACTIVITY_DETECTION_ENABLED
+                    or LONG_RUNNING_ACTIVITY_DETECTION_ENABLED
+                )
                 and now - self._last_media_check >= MEDIA_CHECK_INTERVAL_SECONDS
             ):
                 self._last_media_check = now
-                if is_foreground_media_playing():
+                activity_details = None
+                if (
+                    (
+                        MEDIA_ACTIVITY_DETECTION_ENABLED
+                        and is_foreground_media_playing()
+                    )
+                    or (
+                        LONG_RUNNING_ACTIVITY_DETECTION_ENABLED
+                        and (activity_details := get_foreground_activity_details()) is not None
+                    )
+                ):
+                    if activity_details:
+                        self._on_signal(
+                            "suspicious_automated_activity",
+                            "A script, download, or remote-session process was detected in the foreground.",
+                            activity_details,
+                        )
                     self._activity()
                     continue
             became_idle = False
             with self._state_lock:
                 timeout = self._timeout_seconds
-                if (
-                    not self._idle
-                    and time.monotonic() - self._last_activity >= timeout
-                ):
+                if not self._idle and time.monotonic() - self._last_activity >= timeout:
                     self._idle = True
                     became_idle = True
             if became_idle:
@@ -292,6 +394,8 @@ class TrackerAgent:
         --noconsole for real deployment — print() statements go nowhere
         visible at that point, so every important status change needs to
         also call this."""
+        if SILENT_MODE:
+            return
         print(f"[{title}] {message}")
         if not self.icon:
             return
@@ -322,6 +426,8 @@ class TrackerAgent:
                 pass
 
     def _prompt_credentials(self, error_message=None):
+        if SILENT_MODE and self.token:
+            raise SystemExit("Silent mode requires a valid saved login token.")
         if _has_display():
             try:
                 creds = prompt_login_gui(error_message)
@@ -415,7 +521,8 @@ class TrackerAgent:
     def _settings_loop(self):
         while True:
             self.fetch_settings()
-            time.sleep(300)
+            # Pick up administrator changes quickly without restarting the agent.
+            time.sleep(10)
 
     def _get_error_detail(self, response):
         try:
@@ -489,10 +596,32 @@ class TrackerAgent:
 
     def _start_activity_monitor(self):
         if not self._activity_monitor:
-            self._activity_monitor = ActivityMonitor(self._handle_idle_change, self.idle_timeout_seconds)
+            self._activity_monitor = ActivityMonitor(
+                self._handle_idle_change,
+                self._submit_alert,
+                self.idle_timeout_seconds,
+            )
         else:
             self._activity_monitor.set_timeout(self.idle_timeout_seconds)
         self._activity_monitor.start()
+
+    def _submit_alert(self, alert_type, message, evidence=None):
+        if not self.token:
+            return
+        try:
+            response = requests.post(
+                f"{BACKEND_URL}/alerts/telemetry",
+                json={
+                    "alert_type": alert_type,
+                    "message": message,
+                    "evidence": evidence or {},
+                },
+                headers=self.auth_headers(),
+                timeout=10,
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            print(f"Could not submit security alert: {exc}")
 
     def _handle_idle_change(self, is_idle):
         self._idle = is_idle
@@ -641,15 +770,17 @@ class TrackerAgent:
     def _capture_and_upload(self):
         image_bytes = self.capture_screenshot_bytes()
         ip_address = self.get_system_ip()
+        self._drain_pending_uploads()
         files = {"file": (f"shot_{int(time.time())}.jpg", image_bytes, "image/jpeg")}
         data = {"time_entry_id": self.active_entry_id, "ip_address": ip_address}
-        resp = requests.post(
-            f"{BACKEND_URL}/screenshots",
-            data=data,
-            files=files,
-            headers=self.auth_headers(),
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                f"{BACKEND_URL}/screenshots", data=data, files=files,
+                headers=self.auth_headers(), timeout=30,
+            )
+        except requests.exceptions.RequestException:
+            self._queue_upload(image_bytes, data)
+            raise
         try:
             resp.raise_for_status()
         except requests.exceptions.HTTPError:
@@ -659,6 +790,44 @@ class TrackerAgent:
         captured_at = datetime.now(timezone.utc).astimezone().strftime("%I:%M %p")
         if SCREENSHOT_NOTIFICATIONS_ENABLED:
             self.notify(f"Screenshot captured at {captured_at} (IP {ip_address})")
+
+    def _pending_upload_dir(self):
+        path = os.path.join(DATA_DIR, "pending_screenshots")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _queue_upload(self, image_bytes, data):
+        filename = f"{int(time.time() * 1000)}.jpg"
+        path = os.path.join(self._pending_upload_dir(), filename)
+        with open(path, "wb") as output:
+            output.write(image_bytes)
+        with open(f"{path}.json", "w", encoding="utf-8") as metadata:
+            json.dump(data, metadata)
+
+    def _drain_pending_uploads(self):
+        pending_dir = self._pending_upload_dir()
+        for path in sorted(
+            os.path.join(pending_dir, name)
+            for name in os.listdir(pending_dir)
+            if name.endswith(".jpg")
+        )[:10]:
+            metadata_path = f"{path}.json"
+            if not os.path.exists(metadata_path):
+                continue
+            try:
+                with open(metadata_path, encoding="utf-8") as metadata:
+                    data = json.load(metadata)
+                with open(path, "rb") as image:
+                    response = requests.post(
+                        f"{BACKEND_URL}/screenshots", data=data,
+                        files={"file": (os.path.basename(path), image, "image/jpeg")},
+                        headers=self.auth_headers(), timeout=30,
+                    )
+                response.raise_for_status()
+                os.remove(path)
+                os.remove(metadata_path)
+            except (OSError, requests.exceptions.RequestException):
+                break
 
     # ---------- Tray icon ----------
 
@@ -685,16 +854,22 @@ class TrackerAgent:
             self.icon.stop()
 
     def run(self):
+        if not _acquire_single_instance():
+            print("Org Tracker is already running.")
+            return
         self.load_token()
-        if not self.validate_token():
+        if SILENT_MODE and self.token and not self.validate_token():
+            return
+        if not self.token:
             self.login()
 
-        self.icon = pystray.Icon(
-            "org-tracker",
-            self._make_icon_image("gray"),
-            "Org Tracker (stopped)",
-            menu=self._build_menu(),
-        )
+        if not SILENT_MODE:
+            self.icon = pystray.Icon(
+                "org-tracker",
+                self._make_icon_image("gray"),
+                "Org Tracker (stopped)",
+                menu=self._build_menu(),
+            )
         self._start_activity_monitor()
         self.fetch_settings()
         self.sync_active_entry()
@@ -704,8 +879,11 @@ class TrackerAgent:
         self._command_thread.start()
         self._settings_thread = threading.Thread(target=self._settings_loop, daemon=True)
         self._settings_thread.start()
-        print("Agent started. Look for the tray icon in the notification area.")
-        self.icon.run()
+        if SILENT_MODE:
+            threading.Event().wait()
+        else:
+            print("Agent started. Look for the tray icon in the notification area.")
+            self.icon.run()
 
 
 if __name__ == "__main__":
