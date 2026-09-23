@@ -55,7 +55,7 @@ function Shell({ children }) {
           <NavLink to="/timesheets"><NavIcon type="timesheets" />Timesheets</NavLink>
           <NavLink to="/screenshots"><NavIcon type="screenshots" />Screenshots</NavLink>
           {(currentUser?.role === "super_admin" || currentUser?.role === "admin" || currentUser?.role === "manager") && <NavLink to="/alerts"><NavIcon type="alerts" />Security Alerts</NavLink>}
-          <NavLink className="management-link" to="/tracker-management"><NavIcon type="management" />Tracker Management</NavLink>
+          {(currentUser?.role === "super_admin" || currentUser?.role === "admin") && <NavLink className="management-link" to="/tracker-management"><NavIcon type="management" />Tracker Management</NavLink>}
         </nav>
         <div className="sidebar-footer">
           <div className="admin-profile"><span className="admin-avatar">{userInitials}</span><div><strong>{currentUser?.name || "Loading..."}</strong><small>{currentUser?.email || ""}</small></div></div>

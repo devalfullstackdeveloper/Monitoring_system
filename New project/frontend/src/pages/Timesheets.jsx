@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { listUsers, listTimeEntries } from "../api";
+import { getCurrentUser, listUsers, listTimeEntries } from "../api";
 
 function formatDuration(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -14,7 +14,14 @@ export default function Timesheets() {
   const [entries, setEntries] = useState([]);
 
   useEffect(() => {
-    listUsers().then(setUsers);
+    getCurrentUser().then(async (currentUser) => {
+      if (currentUser.role === "employee") {
+        setUsers([currentUser]);
+        setSelectedUserId(String(currentUser.id));
+      } else {
+        setUsers(await listUsers());
+      }
+    });
   }, []);
 
   useEffect(() => {

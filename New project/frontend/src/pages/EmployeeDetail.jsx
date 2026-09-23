@@ -74,15 +74,31 @@ export default function EmployeeDetail() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    setLoading(true);
-    Promise.all([getUser(userId), listTimeEntries(userId), listScreenshots(userId)])
-      .then(([u, e, s]) => {
-        setUser(u);
-        setEntries(e);
-        setScreenshots(s);
-      })
-      .finally(() => setLoading(false));
+    let mounted = true;
+    const load = () => {
+      setLoading(true);
+      Promise.all([getUser(userId), listTimeEntries(userId), listScreenshots(userId)])
+        .then(([u, e, s]) => {
+          if (!mounted) return;
+          setUser(u);
+          setEntries(e);
+          setScreenshots(s);
+        })
+        .finally(() => mounted && setLoading(false));
+    };
+    load();
+    const interval = setInterval(load, 10000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
   }, [userId]);
+
+  const [, refreshClock] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => refreshClock((value) => value + 1), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const selectedDay = useMemo(() => dayRange(dateFilter), [dateFilter]);
   const dayEntries = useMemo(() => entries

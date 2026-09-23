@@ -28,7 +28,11 @@ def upload_screenshot(
 ):
     entry = (
         db.query(models.TimeEntry)
-        .filter(models.TimeEntry.id == time_entry_id, models.TimeEntry.user_id == current_user.id)
+        .filter(
+            models.TimeEntry.id == time_entry_id,
+            models.TimeEntry.user_id == current_user.id,
+            models.TimeEntry.status == models.TimeEntryStatus.active,
+        )
         .first()
     )
     if not entry:
@@ -47,7 +51,8 @@ def upload_screenshot(
     settings = db.query(models.AppSettings).first()
     if settings and settings.screenshot_masking_enabled:
         with Image.open(dest_path) as image:
-            image.filter(ImageFilter.GaussianBlur(radius=10)).save(dest_path, format="JPEG", quality=70)
+            masked = image.convert("RGB").filter(ImageFilter.GaussianBlur(radius=10))
+            masked.save(dest_path, format="JPEG", quality=70)
 
     screenshot = models.Screenshot(
         time_entry_id=time_entry_id,

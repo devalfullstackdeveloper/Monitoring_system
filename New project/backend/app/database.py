@@ -34,9 +34,8 @@ def migrate_security_schema():
         if DATABASE_URL.startswith("postgresql"):
             for role in ("super_admin", "manager"):
                 connection.execute(text(
-                    "DO $$ BEGIN ALTER TYPE userrole ADD VALUE IF NOT EXISTS :role; "
-                    "EXCEPTION WHEN undefined_object THEN NULL; END $$;"
-                ), {"role": role})
+                    f"ALTER TYPE userrole ADD VALUE IF NOT EXISTS '{role}'"
+                ))
 
         inspector = inspect(connection)
         if "users" not in inspector.get_table_names():
