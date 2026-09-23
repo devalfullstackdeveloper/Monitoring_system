@@ -37,6 +37,7 @@ from pystray import MenuItem as Item
 
 from media_activity import is_foreground_media_playing
 from mouse_pattern_detector import MousePatternDetector
+from synthetic_input_detector import SyntheticInputDetector
 
 from config import (
     BACKEND_URL,
@@ -121,9 +122,11 @@ class ActivityMonitor:
         on_idle_change,
         timeout_seconds=IDLE_TIMEOUT_SECONDS,
         on_pattern_change=None,
+        on_synthetic_input=None,
     ):
         self._on_idle_change = on_idle_change
         self._on_pattern_change = on_pattern_change
+        self._on_synthetic_input = on_synthetic_input
         self._timeout_seconds = timeout_seconds
         self._last_activity = time.monotonic()
         self._last_media_check = 0.0
@@ -135,6 +138,13 @@ class ActivityMonitor:
         self._keyboard_listener = None
         self._pattern_detector = MousePatternDetector()
         self._pattern_detected = False
+        self._synthetic_input_detector = SyntheticInputDetector(
+            on_real_input=self._on_real_input,
+            on_synthetic_input=self._on_synthetic_input_event,
+        )
+        self._synthetic_streak = 0
+        self._real_streak = 0
+        self._synthetic_detected = False
 
         # Windows system-input tracking
         self._last_system_input = self._get_system_input_time()
@@ -177,6 +187,9 @@ class ActivityMonitor:
             self._idle = False
             self._pattern_detector.reset()
             self._pattern_detected = False
+            self._synthetic_streak = 0
+            self._real_streak = 0
+            self._synthetic_detected = False
             self._stop_event.clear()
             # Reset Windows input timestamp when monitoring starts.
             self._last_system_input = self._get_system_input_time()
@@ -190,6 +203,7 @@ class ActivityMonitor:
             )
             self._mouse_listener.start()
             self._keyboard_listener.start()
+            self._synthetic_input_detector.start()
             self._thread = threading.Thread(
                 target=self._run,
                 daemon=True
@@ -198,6 +212,7 @@ class ActivityMonitor:
 
     def stop(self):
         self._stop_event.set()
+        self._synthetic_input_detector.stop()
         for listener in (
             self._mouse_listener,
             self._keyboard_listener
@@ -231,6 +246,22 @@ class ActivityMonitor:
     def _on_other_input(self, *args):
         self._pattern_detector.record_other_input()
         self._activity()
+
+    def _on_real_input(self):
+        self._real_streak += 1
+        self._synthetic_streak = max(0, self._synthetic_streak - 2)
+        if self._synthetic_detected and self._synthetic_streak == 0:
+            self._synthetic_detected = False
+            if self._on_synthetic_input:
+                self._on_synthetic_input(False)
+
+    def _on_synthetic_input_event(self):
+        self._synthetic_streak += 1
+        self._real_streak = 0
+        if self._synthetic_streak >= 5 and not self._synthetic_detected:
+            self._synthetic_detected = True
+            if self._on_synthetic_input:
+                self._on_synthetic_input(True)
 
     def _check_windows_input(self):
         """
@@ -303,6 +334,7 @@ class TrackerAgent:
         self._idle = False
         self._resume_after_idle = False
         self._stopped_due_to_pattern = False
+        self._stopped_due_to_synthetic_input = False
         self._settings_thread = None
         self.icon = None
         self.screenshot_interval_seconds = SCREENSHOT_INTERVAL_SECONDS
@@ -523,6 +555,7 @@ class TrackerAgent:
                 self._handle_idle_change,
                 self.idle_timeout_seconds,
                 self._handle_pattern_change,
+                self._handle_synthetic_input_change,
             )
         else:
             self._activity_monitor.set_timeout(self.idle_timeout_seconds)
@@ -538,7 +571,11 @@ class TrackerAgent:
                     f"(session #{entry_id})."
                 )
                 self._stop_tracking(notify_user=False, preserve_for_idle=True)
-        elif self._resume_after_idle:
+        elif (
+            self._resume_after_idle
+            and not self._stopped_due_to_pattern
+            and not self._stopped_due_to_synthetic_input
+        ):
             self._resume_after_idle = False
             self.start_tracking()
             self.notify("Activity detected. Tracking resumed.")
@@ -557,10 +594,38 @@ class TrackerAgent:
 
         if self._stopped_due_to_pattern:
             self._stopped_due_to_pattern = False
-            if self._resume_after_idle and not self.tracking:
+            if (
+                self._resume_after_idle
+                and not self.tracking
+                and not self._stopped_due_to_synthetic_input
+            ):
                 self._resume_after_idle = False
                 self.start_tracking()
                 self.notify("Automated mouse movement ended. Tracking resumed.")
+
+    def _handle_synthetic_input_change(self, detected):
+        if detected:
+            if not self._stopped_due_to_synthetic_input:
+                self._stopped_due_to_synthetic_input = True
+                if self.tracking:
+                    entry_id = self.active_entry_id
+                    self._stop_tracking(notify_user=False, preserve_for_idle=True)
+                    self.notify(
+                        f"Tracking paused because synthetic input was detected "
+                        f"(session #{entry_id})."
+                    )
+            return
+
+        if self._stopped_due_to_synthetic_input:
+            self._stopped_due_to_synthetic_input = False
+            if (
+                self._resume_after_idle
+                and not self.tracking
+                and not self._stopped_due_to_pattern
+            ):
+                self._resume_after_idle = False
+                self.start_tracking()
+                self.notify("Synthetic input ended. Tracking resumed.")
 
     def start_tracking(self, icon=None, item=None):
         if not self._start_lock.acquire(blocking=False):
@@ -571,7 +636,11 @@ class TrackerAgent:
             self._start_lock.release()
 
     def _start_tracking(self):
-        if self.tracking:
+        if (
+            self.tracking
+            or self._stopped_due_to_pattern
+            or self._stopped_due_to_synthetic_input
+        ):
             return
 
         try:
@@ -635,9 +704,11 @@ class TrackerAgent:
             if not preserve_for_idle:
                 self._resume_after_idle = False
                 self._stopped_due_to_pattern = False
+                self._stopped_due_to_synthetic_input = False
             return
         if not preserve_for_idle:
             self._stopped_due_to_pattern = False
+            self._stopped_due_to_synthetic_input = False
         self._resume_after_idle = preserve_for_idle
         self.tracking = False
         self._stop_event.set()
