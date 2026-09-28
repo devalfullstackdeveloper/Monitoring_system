@@ -112,12 +112,55 @@ def get_descendant_ids(db: Session, root_id: int) -> set:
     return descendants
 
 
+def get_visible_member_ids(db: Session, current_user: models.User) -> Optional[set]:
+    """Return the member IDs visible to a user; None means unrestricted access."""
+    if current_user.role == models.UserRole.superadmin:
+        return None
+
+    if current_user.role == models.UserRole.user:
+        visible_ids = {current_user.id}
+        team_lead = (
+            db.query(models.User)
+            .filter(
+                models.User.id == current_user.parent_id,
+                models.User.role == models.UserRole.tl,
+            )
+            .first()
+        )
+        if team_lead:
+            visible_ids.add(team_lead.id)
+            teammates = (
+                db.query(models.User.id)
+                .filter(
+                    models.User.parent_id == team_lead.id,
+                    models.User.role == models.UserRole.user,
+                )
+                .all()
+            )
+            visible_ids.update(member_id for (member_id,) in teammates)
+        return visible_ids
+
+    visible_roles = {
+        models.UserRole.admin: {models.UserRole.manager, models.UserRole.tl, models.UserRole.user},
+        models.UserRole.manager: {models.UserRole.tl, models.UserRole.user},
+        models.UserRole.tl: {models.UserRole.user},
+    }.get(current_user.role, set())
+    descendant_ids = get_descendant_ids(db, current_user.id)
+    visible_descendants = (
+        db.query(models.User.id)
+        .filter(
+            models.User.id.in_(descendant_ids),
+            models.User.role.in_(visible_roles),
+        )
+        .all()
+    ) if descendant_ids and visible_roles else []
+    return {current_user.id, *(member_id for (member_id,) in visible_descendants)}
+
+
 def can_manage(db: Session, current_user: models.User, target_user_id: int) -> bool:
     """Whether current_user is allowed to view/edit target_user_id: Super
     Admin can manage anyone; anyone else can manage themselves and anyone
     in their own subtree (people they created, directly or indirectly)."""
     if current_user.role == models.UserRole.superadmin:
         return True
-    if target_user_id == current_user.id:
-        return True
-    return target_user_id in get_descendant_ids(db, current_user.id)
+    return target_user_id in get_visible_member_ids(db, current_user)

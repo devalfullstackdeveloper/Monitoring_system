@@ -55,23 +55,12 @@ def list_users(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Return the current user's reporting subtree."""
+    """Return only members visible within the current user's role scope."""
     if current_user.role == models.UserRole.superadmin:
         return db.query(models.User).all()
 
-    if current_user.role == models.UserRole.user:
-        raise HTTPException(status_code=403, detail="You don't have permission to view other users")
-    all_users = db.query(models.User).all()
-    by_parent = {}
-    for user in all_users:
-        by_parent.setdefault(user.parent_id, []).append(user)
-    result = [current_user]
-    frontier = [current_user.id]
-    while frontier:
-        children = [child for parent_id in frontier for child in by_parent.get(parent_id, [])]
-        result.extend(children)
-        frontier = [child.id for child in children]
-    return result
+    visible_ids = auth.get_visible_member_ids(db, current_user)
+    return db.query(models.User).filter(models.User.id.in_(visible_ids)).all()
 
 
 @router.post("", response_model=schemas.UserOut)

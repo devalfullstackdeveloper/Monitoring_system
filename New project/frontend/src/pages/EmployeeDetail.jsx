@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { getUser, listTimeEntries, listScreenshots } from "../api";
+import { getCurrentUser, getUser, listTimeEntries, listScreenshots } from "../api";
 
 function toLocalDateKey(dateLike) {
   const d = new Date(dateLike);
@@ -60,9 +60,9 @@ function formatTimeRange(entry) {
 }
 
 export default function EmployeeDetail() {
-  const { id } = useParams();
+  const { id, role } = useParams();
   const navigate = useNavigate();
-  const userId = Number(id);
+  const [userId, setUserId] = useState(id === "me" ? null : Number(id));
 
   const [user, setUser] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -73,14 +73,23 @@ export default function EmployeeDetail() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([getUser(userId), listTimeEntries(userId), listScreenshots(userId)])
+    const userRequest = id === "me" ? getCurrentUser() : getUser(Number(id));
+    userRequest
+      .then((currentUser) => {
+        setUserId(currentUser.id);
+        return Promise.all([
+          Promise.resolve(currentUser),
+          listTimeEntries(currentUser.id),
+          listScreenshots(currentUser.id),
+        ]);
+      })
       .then(([u, e, s]) => {
         setUser(u);
         setEntries(e);
         setScreenshots(s);
       })
       .finally(() => setLoading(false));
-  }, [userId]);
+  }, [id]);
 
   const dayEntries = useMemo(
     () => entries.filter((e) => localDay(e.start_time) === dateFilter).sort((a, b) => new Date(a.start_time) - new Date(b.start_time)),
@@ -184,6 +193,8 @@ export default function EmployeeDetail() {
 
   const liveStatus = activeEntry ? (activeEntry.is_idle ? "idle" : "active") : "offline";
   const liveStatusLabel = liveStatus === "active" ? "Live Syncing" : liveStatus === "idle" ? "Idle" : "Offline";
+  const memberRoleNames = { admins: "Admins", managers: "Managers", "team-leads": "Team Leads", users: "Users" };
+  const roleBasePath = role ? `/members/${role}/${id}` : `/employee/${id}`;
 
   if (loading) return <div className="loading-state">Loading...</div>;
   if (!user) return <div className="loading-state">Employee not found.</div>;
@@ -192,11 +203,21 @@ export default function EmployeeDetail() {
     <div>
       <div className="page-header-bar">
         <nav className="page-breadcrumb" aria-label="Breadcrumb">
-          <Link to="/" className="breadcrumb-link">
-            Dashboard
-          </Link>
-          <span className="breadcrumb-separator">›</span>
-          <span className="breadcrumb-current">EmployeeDetail</span>
+          {role ? (
+            <>
+              <Link to="/members" className="breadcrumb-link">Members</Link>
+              <span className="breadcrumb-separator">›</span>
+              <Link to={`/members/${role}`} className="breadcrumb-link">{memberRoleNames[role] || "Members"}</Link>
+              <span className="breadcrumb-separator">›</span>
+              <span className="breadcrumb-current">{user.name}</span>
+            </>
+          ) : (
+            <>
+              <Link to="/" className="breadcrumb-link">Dashboard</Link>
+              <span className="breadcrumb-separator">›</span>
+              <span className="breadcrumb-current">{user.name}</span>
+            </>
+          )}
         </nav>
         <span className={`pill pill-${liveStatus}`}>
           <span className="pill-dot" /> {liveStatusLabel}
@@ -253,7 +274,7 @@ export default function EmployeeDetail() {
           <button
             type="button"
             className="metric-card metric-card-btn"
-            onClick={() => navigate(`/employee/${userId}/screenshots`)}
+            onClick={() => navigate(`${roleBasePath}/screenshots`)}
             title="View all screenshots for this employee"
           >
             <div className="metric-card-top">

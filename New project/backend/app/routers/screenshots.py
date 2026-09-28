@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import models, schemas, auth
@@ -64,13 +65,18 @@ def list_screenshots(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     query = db.query(models.Screenshot)
-
     if current_user.role == models.UserRole.superadmin:
         visible_ids = None
-    elif current_user.role == models.UserRole.user:
-        visible_ids = {current_user.id}
     else:
-        visible_ids = auth.get_descendant_ids(db, current_user.id) | {current_user.id}
+        visible_ids = auth.get_visible_member_ids(db, current_user)
+
+    if current_user.role != models.UserRole.superadmin:
+        if user_id is not None and not auth.can_manage(db, current_user, user_id):
+            raise HTTPException(status_code=404, detail="User not found")
+        if time_entry_id is not None:
+            entry = db.query(models.TimeEntry).filter(models.TimeEntry.id == time_entry_id).first()
+            if not entry or not auth.can_manage(db, current_user, entry.user_id):
+                raise HTTPException(status_code=404, detail="Time entry not found")
 
     if visible_ids is not None:
         query = query.filter(models.Screenshot.user_id.in_(visible_ids))
@@ -81,3 +87,24 @@ def list_screenshots(
         query = query.filter(models.Screenshot.time_entry_id == time_entry_id)
 
     return query.order_by(models.Screenshot.captured_at.desc()).all()
+
+
+@router.get("/{screenshot_id}/file")
+def get_screenshot_file(
+    screenshot_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    screenshot = db.query(models.Screenshot).filter(models.Screenshot.id == screenshot_id).first()
+    if not screenshot or not auth.can_manage(db, current_user, screenshot.user_id):
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+
+    storage_root = os.path.realpath(STORAGE_DIR)
+    file_path = os.path.realpath(screenshot.file_path)
+    try:
+        is_within_storage = os.path.commonpath([storage_root, file_path]) == storage_root
+    except ValueError:
+        is_within_storage = False
+    if not is_within_storage or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Screenshot file not found")
+    return FileResponse(file_path)

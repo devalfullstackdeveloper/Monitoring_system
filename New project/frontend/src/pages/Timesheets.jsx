@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { listUsers, listTimeEntries } from "../api";
+import { getCurrentUser, listUsers, listTimeEntries } from "../api";
 
 function formatDuration(seconds) {
   const h = Math.floor(seconds / 3600);
@@ -10,11 +10,15 @@ function formatDuration(seconds) {
 
 export default function Timesheets() {
   const [users, setUsers] = useState([]);
+  const [currentUser, setCurrentUser] = useState(null);
   const [selectedUserId, setSelectedUserId] = useState("");
   const [entries, setEntries] = useState([]);
 
   useEffect(() => {
-    listUsers().then(setUsers);
+    Promise.all([getCurrentUser(), listUsers()]).then(([user, userList]) => {
+      setCurrentUser(user);
+      setUsers(userList);
+    });
   }, []);
 
   useEffect(() => {
@@ -49,7 +53,15 @@ export default function Timesheets() {
           <tbody>
             {entries.map((e) => (
               <tr key={e.id}>
-                <td>{users.find((u) => u.id === e.user_id)?.name || e.user_id}</td>
+                <td>
+                  {e.user_id === currentUser?.id ? (
+                    <Link to={`/employee/${e.user_id}`}>
+                      {users.find((u) => u.id === e.user_id)?.name || e.user_id}
+                    </Link>
+                  ) : (
+                    users.find((u) => u.id === e.user_id)?.name || e.user_id
+                  )}
+                </td>
                 <td>{new Date(e.start_time).toLocaleString()}</td>
                 <td>{e.end_time ? new Date(e.end_time).toLocaleString() : "-"}</td>
                 <td>{formatDuration(e.duration_seconds)}</td>

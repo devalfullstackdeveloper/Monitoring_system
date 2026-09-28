@@ -105,12 +105,11 @@ export async function updateSettings(payload) {
   return handle(resp);
 }
 
-export function screenshotUrl(filePath) {
-  // backend serves the storage dir at /media/screenshots
-  // normalize Windows backslashes to forward slashes before matching
-  const normalized = filePath.replace(/\\/g, "/");
-  const marker = "storage/screenshots/";
-  const idx = normalized.indexOf(marker);
-  const relative = idx >= 0 ? normalized.slice(idx + marker.length) : normalized;
-  return `${BACKEND_URL}/media/screenshots/${relative}`;
+export async function screenshotImageUrl(screenshotId) {
+  const resp = await fetch(`${BACKEND_URL}/screenshots/${screenshotId}/file`, { headers: authHeaders() });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed (${resp.status})`);
+  }
+  return URL.createObjectURL(await resp.blob());
 }
