@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
   import { useSearchParams } from "react-router-dom";
-  import { listScreenshots, screenshotUrl } from "../api";
+  import { listScreenshots } from "../api";
+  import useScreenshotImageUrls from "../hooks/useScreenshotImageUrls";
 
   export default function Screenshots() {
     const [searchParams] = useSearchParams();
@@ -8,6 +9,7 @@ import { useEffect, useState } from "react";
     const userId = searchParams.get("user_id") || undefined;
     const [shots, setShots] = useState([]);
     const [selected, setSelected] = useState(null);
+    const imageUrls = useScreenshotImageUrls(shots);
 
     useEffect(() => {
       let mounted = true;
@@ -37,7 +39,7 @@ import { useEffect, useState } from "react";
           {shots.map((s) => (
             <div key={s.id} className="card">
               <img
-                src={screenshotUrl(s.file_path)}
+                src={imageUrls[s.id] || undefined}
                 alt={`Screenshot ${s.id}`}
                 onClick={() => setSelected(s)}
               />
@@ -52,7 +54,7 @@ import { useEffect, useState } from "react";
           <div className="lightbox-overlay" onClick={() => setSelected(null)}>
             <div className="lightbox-content" onClick={(e) => e.stopPropagation()}>
               <button className="lightbox-close" onClick={() => setSelected(null)}>✕</button>
-              <img src={screenshotUrl(selected.file_path)} alt={`Screenshot ${selected.id}`} />
+              <img src={imageUrls[selected.id] || undefined} alt={`Screenshot ${selected.id}`} />
               <div className="lightbox-caption">
                 {new Date(selected.captured_at).toLocaleString()} — IP: {selected.ip_address}
               </div>

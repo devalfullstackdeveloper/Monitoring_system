@@ -39,6 +39,8 @@ from pystray import MenuItem as Item
 
 from activity_detection import get_foreground_activity_details
 from media_activity import is_foreground_media_playing
+from mouse_pattern_detector import MousePatternDetector
+from synthetic_input_detector import SyntheticInputDetector
 from system_state import (
     get_system_uptime_milliseconds,
     is_workstation_locked,
@@ -148,6 +150,16 @@ def prompt_login_gui(error_message=None):
 class ActivityMonitor:
     """Track mouse and keyboard activity through one monitor per input type."""
 
+    def __init__(
+        self,
+        on_idle_change,
+        timeout_seconds=IDLE_TIMEOUT_SECONDS,
+        on_pattern_change=None,
+        on_synthetic_input=None,
+    ):
+        self._on_idle_change = on_idle_change
+        self._on_pattern_change = on_pattern_change
+        self._on_synthetic_input = on_synthetic_input
     def __init__(self, on_idle_change, on_signal=None, timeout_seconds=IDLE_TIMEOUT_SECONDS):
         self._on_idle_change = on_idle_change
         self._on_signal = on_signal or (lambda *_args, **_kwargs: None)
@@ -162,6 +174,15 @@ class ActivityMonitor:
         self._thread = None
         self._mouse_listener = None
         self._keyboard_listener = None
+        self._pattern_detector = MousePatternDetector()
+        self._pattern_detected = False
+        self._synthetic_input_detector = SyntheticInputDetector(
+            on_real_input=self._on_real_input,
+            on_synthetic_input=self._on_synthetic_input_event,
+        )
+        self._synthetic_streak = 0
+        self._real_streak = 0
+        self._synthetic_detected = False
         self._mouse_events = deque(maxlen=60)
         self._keyboard_events = deque(maxlen=60)
         self._last_jiggler_signal = 0.0
@@ -199,8 +220,27 @@ class ActivityMonitor:
             self._system_blocked = False
             self._last_system_input = self._get_system_input_time()
             self._idle = False
+            self._pattern_detector.reset()
+            self._pattern_detected = False
+            self._synthetic_streak = 0
+            self._real_streak = 0
+            self._synthetic_detected = False
             self._stop_event.clear()
             self._mouse_listener = mouse.Listener(
+                on_move=self._on_mouse_move,
+                on_click=self._on_other_input,
+                on_scroll=self._on_other_input,
+            )
+            self._keyboard_listener = keyboard.Listener(
+                on_press=self._on_other_input
+            )
+            self._mouse_listener.start()
+            self._keyboard_listener.start()
+            self._synthetic_input_detector.start()
+            self._thread = threading.Thread(
+                target=self._run,
+                daemon=True
+            )
                 on_move=self._mouse_activity,
                 on_click=self._activity,
                 on_scroll=self._activity,
@@ -213,6 +253,11 @@ class ActivityMonitor:
 
     def stop(self):
         self._stop_event.set()
+        self._synthetic_input_detector.stop()
+        for listener in (
+            self._mouse_listener,
+            self._keyboard_listener
+        ):
         for listener in (self._mouse_listener, self._keyboard_listener):
             if listener:
                 listener.stop()
@@ -235,6 +280,29 @@ class ActivityMonitor:
         if became_active:
             self._on_idle_change(False)
 
+    def _on_mouse_move(self, *args):
+        self._pattern_detector.record_mouse_move()
+        self._activity()
+
+    def _on_other_input(self, *args):
+        self._pattern_detector.record_other_input()
+        self._activity()
+
+    def _on_real_input(self):
+        self._real_streak += 1
+        self._synthetic_streak = max(0, self._synthetic_streak - 2)
+        if self._synthetic_detected and self._synthetic_streak == 0:
+            self._synthetic_detected = False
+            if self._on_synthetic_input:
+                self._on_synthetic_input(False)
+
+    def _on_synthetic_input_event(self):
+        self._synthetic_streak += 1
+        self._real_streak = 0
+        if self._synthetic_streak >= 5 and not self._synthetic_detected:
+            self._synthetic_detected = True
+            if self._on_synthetic_input:
+                self._on_synthetic_input(True)
     def _mouse_activity(self, *args):
         self._mouse_events.append(time.monotonic())
         self._activity(*args)
@@ -358,6 +426,11 @@ class ActivityMonitor:
                         )
                     self._activity()
                     continue
+            pattern_detected = self._pattern_detector.is_automated_pattern()
+            if pattern_detected != self._pattern_detected:
+                self._pattern_detected = pattern_detected
+                if self._on_pattern_change:
+                    self._on_pattern_change(pattern_detected)
             became_idle = False
             with self._state_lock:
                 timeout = self._timeout_seconds
@@ -380,6 +453,8 @@ class TrackerAgent:
         self._activity_monitor = None
         self._idle = False
         self._resume_after_idle = False
+        self._stopped_due_to_pattern = False
+        self._stopped_due_to_synthetic_input = False
         self._settings_thread = None
         self.icon = None
         self.screenshot_interval_seconds = SCREENSHOT_INTERVAL_SECONDS
@@ -563,6 +638,11 @@ class TrackerAgent:
             if entry:
                 self.active_entry_id = entry["id"]
                 self.tracking = True
+                self._idle = bool(entry.get("is_idle", False))
+                try:
+                    self._send_heartbeat()
+                except Exception as e:
+                    print(f"Active-session heartbeat failed: {e}")
                 self._start_worker()
             else:
                 self.active_entry_id = None
@@ -606,6 +686,9 @@ class TrackerAgent:
         if not self._activity_monitor:
             self._activity_monitor = ActivityMonitor(
                 self._handle_idle_change,
+                self.idle_timeout_seconds,
+                self._handle_pattern_change,
+                self._handle_synthetic_input_change,
                 self._submit_alert,
                 self.idle_timeout_seconds,
             )
@@ -641,10 +724,61 @@ class TrackerAgent:
                     f"(session #{entry_id})."
                 )
                 self._stop_tracking(notify_user=False, preserve_for_idle=True)
-        elif self._resume_after_idle:
+        elif (
+            self._resume_after_idle
+            and not self._stopped_due_to_pattern
+            and not self._stopped_due_to_synthetic_input
+        ):
             self._resume_after_idle = False
             self.start_tracking()
             self.notify("Activity detected. Tracking resumed.")
+
+    def _handle_pattern_change(self, detected):
+        if detected:
+            if self.tracking and not self._stopped_due_to_pattern:
+                self._stopped_due_to_pattern = True
+                entry_id = self.active_entry_id
+                self._stop_tracking(notify_user=False, preserve_for_idle=True)
+                self.notify(
+                    f"Tracking paused because automated mouse movement was detected "
+                    f"(session #{entry_id})."
+                )
+            return
+
+        if self._stopped_due_to_pattern:
+            self._stopped_due_to_pattern = False
+            if (
+                self._resume_after_idle
+                and not self.tracking
+                and not self._stopped_due_to_synthetic_input
+            ):
+                self._resume_after_idle = False
+                self.start_tracking()
+                self.notify("Automated mouse movement ended. Tracking resumed.")
+
+    def _handle_synthetic_input_change(self, detected):
+        if detected:
+            if not self._stopped_due_to_synthetic_input:
+                self._stopped_due_to_synthetic_input = True
+                if self.tracking:
+                    entry_id = self.active_entry_id
+                    self._stop_tracking(notify_user=False, preserve_for_idle=True)
+                    self.notify(
+                        f"Tracking paused because synthetic input was detected "
+                        f"(session #{entry_id})."
+                    )
+            return
+
+        if self._stopped_due_to_synthetic_input:
+            self._stopped_due_to_synthetic_input = False
+            if (
+                self._resume_after_idle
+                and not self.tracking
+                and not self._stopped_due_to_pattern
+            ):
+                self._resume_after_idle = False
+                self.start_tracking()
+                self.notify("Synthetic input ended. Tracking resumed.")
 
     def start_tracking(self, icon=None, item=None):
         if not self._start_lock.acquire(blocking=False):
@@ -655,7 +789,11 @@ class TrackerAgent:
             self._start_lock.release()
 
     def _start_tracking(self):
-        if self.tracking:
+        if (
+            self.tracking
+            or self._stopped_due_to_pattern
+            or self._stopped_due_to_synthetic_input
+        ):
             return
 
         try:
@@ -703,6 +841,10 @@ class TrackerAgent:
         self.active_entry_id = resp.json()["id"]
         self.tracking = True
         self._idle = False
+        try:
+            self._send_heartbeat()
+        except Exception as e:
+            print(f"Initial heartbeat failed: {e}")
         self._start_worker()
         self._update_menu()
         self.notify(f"Tracking started (IP {ip_address})")
@@ -714,7 +856,12 @@ class TrackerAgent:
         if not self.tracking:
             if not preserve_for_idle:
                 self._resume_after_idle = False
+                self._stopped_due_to_pattern = False
+                self._stopped_due_to_synthetic_input = False
             return
+        if not preserve_for_idle:
+            self._stopped_due_to_pattern = False
+            self._stopped_due_to_synthetic_input = False
         self._resume_after_idle = preserve_for_idle
         self.tracking = False
         self._stop_event.set()
@@ -758,6 +905,12 @@ class TrackerAgent:
                 break
             elapsed += 1
             heartbeat_elapsed += 1
+            if heartbeat_elapsed >= 10:
+                heartbeat_elapsed = 0
+                try:
+                    self._send_heartbeat()
+                except Exception as e:
+                    print(f"Heartbeat failed: {e}")
             if heartbeat_elapsed >= 10 and self.active_entry_id:
                 heartbeat_elapsed = 0
                 try:
@@ -777,6 +930,18 @@ class TrackerAgent:
                 except Exception as e:
                     self._log(f"Screenshot failed: {type(e).__name__}: {e}")
                     self.notify(f"Screenshot failed: {e}")
+
+    def _send_heartbeat(self):
+        resp = requests.post(
+            f"{BACKEND_URL}/time-entries/{self.active_entry_id}/heartbeat",
+            json={"is_idle": self._idle},
+            headers=self.auth_headers(),
+            timeout=10,
+        )
+        if resp.status_code == 401:
+            self._handle_unauthorized()
+            return
+        resp.raise_for_status()
 
     def _command_loop(self):
         request_file = os.path.join(DATA_DIR, "start_tracking.request")

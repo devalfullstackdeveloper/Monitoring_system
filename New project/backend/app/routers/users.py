@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -10,48 +10,83 @@ from ..audit import record
 router = APIRouter(prefix="/users", tags=["users"])
 
 
+def _is_descendant_of(db: Session, node: models.User, ancestor_id: int) -> bool:
+    current = node
+    seen = set()
+    while current and current.parent_id and current.id not in seen:
+        seen.add(current.id)
+        if current.parent_id == ancestor_id:
+            return True
+        current = db.query(models.User).filter(models.User.id == current.parent_id).first()
+    return False
+
+
+def _validate_parent(
+    db: Session,
+    acting_user: models.User,
+    target_role: models.UserRole,
+    parent_id: Optional[int],
+) -> Optional[models.User]:
+    required_role = models.ROLE_HIERARCHY[target_role]
+    if required_role is None:
+        return None
+    if parent_id is None:
+        raise HTTPException(status_code=400, detail=f"parent_id is required when role is '{target_role.value}'.")
+
+    parent = db.query(models.User).filter(models.User.id == parent_id).first()
+    if not parent:
+        raise HTTPException(status_code=404, detail=f"Parent user with id {parent_id} not found")
+    if parent.role != required_role:
+        raise HTTPException(
+            status_code=400,
+            detail=f"parent_id {parent_id} must reference a user with role '{required_role.value}'.",
+        )
+    if acting_user.role != models.UserRole.superadmin and parent.id != acting_user.id and not _is_descendant_of(db, parent, acting_user.id):
+        raise HTTPException(status_code=403, detail="You can only assign users under your own reporting chain.")
+    return parent
+
+
 @router.get("/me", response_model=schemas.UserOut)
 def read_current_user(current_user: models.User = Depends(auth.get_current_user)):
     return current_user
 
 
 @router.get("", response_model=List[schemas.UserOut])
-def list_users(db: Session = Depends(get_db), _: models.User = Depends(auth.require_manager_or_above)):
-    current_user = _
-    return auth.visible_user_filter(db.query(models.User), current_user).order_by(models.User.id).all()
+def list_users(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Return only members visible within the current user's role scope."""
+    if current_user.role == models.UserRole.superadmin:
+        return db.query(models.User).all()
+
+    visible_ids = auth.get_visible_member_ids(db, current_user)
+    return db.query(models.User).filter(models.User.id.in_(visible_ids)).all()
 
 
 @router.post("", response_model=schemas.UserOut)
 def create_user(
     payload: schemas.UserCreate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.require_manager_or_above),
+    current_user: models.User = Depends(auth.require_can_manage_users),
 ):
+    allowed = auth.CREATABLE_ROLES.get(current_user.role, set())
+    if payload.role not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"A {current_user.role.value} cannot create a {payload.role.value}",
+        )
+
     if db.query(models.User).filter(models.User.email == payload.email).first():
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    if current_user.role == models.UserRole.manager and payload.role != models.UserRole.employee:
-        raise HTTPException(status_code=403, detail="Managers can only create employees")
-    if current_user.role == models.UserRole.admin and payload.role == models.UserRole.super_admin:
-        raise HTTPException(status_code=403, detail="Only a super admin can create super admins")
-
-    organization_id = payload.organization_id or current_user.organization_id
-    manager_id = payload.manager_id
-    if current_user.role == models.UserRole.super_admin and payload.role != models.UserRole.super_admin and organization_id is None:
-        raise HTTPException(status_code=400, detail="An organization is required for non-super-admin users")
-    if current_user.role == models.UserRole.manager:
-        organization_id = current_user.organization_id
-        manager_id = current_user.id
-
-    _validate_assignment(db, current_user, payload.role, organization_id, manager_id)
-
+    parent = _validate_parent(db, current_user, payload.role, payload.parent_id)
     user = models.User(
         name=payload.name,
         email=payload.email,
         hashed_password=auth.hash_password(payload.password),
         role=payload.role,
-        organization_id=organization_id,
-        manager_id=manager_id,
+        parent_id=parent.id if parent else None,
     )
     db.add(user)
     db.commit()
@@ -59,13 +94,17 @@ def create_user(
     db.refresh(user)
     return user
 
+
 @router.get("/{user_id}", response_model=schemas.UserOut)
 def get_user(
     user_id: int,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.require_manager_or_above),
+    current_user: models.User = Depends(auth.get_current_user),
 ):
-    user = auth.visible_user_filter(db.query(models.User), current_user).filter(models.User.id == user_id).first()
+    if not auth.can_manage(db, current_user, user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
@@ -101,34 +140,78 @@ def update_user(
     user_id: int,
     payload: schemas.UserUpdate,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.require_manager_or_above),
+    acting_user: models.User = Depends(auth.require_can_manage_users),
 ):
-    user = auth.visible_user_filter(db.query(models.User), current_user).filter(models.User.id == user_id).first()
+    if not auth.can_manage(db, acting_user, user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    next_role = payload.role or user.role
-    next_org = payload.organization_id if "organization_id" in payload.model_fields_set else user.organization_id
-    next_manager = payload.manager_id if "manager_id" in payload.model_fields_set else user.manager_id
-    if current_user.role == models.UserRole.manager:
-        if next_role != models.UserRole.employee or user.manager_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Managers can only edit their own employees")
-        next_org = current_user.organization_id
-        next_manager = current_user.id
-    if current_user.role == models.UserRole.admin and next_role == models.UserRole.super_admin:
-        raise HTTPException(status_code=403, detail="Only a super admin can assign super admins")
-    _validate_assignment(db, current_user, next_role, next_org, next_manager, user)
-    if payload.email and payload.email != user.email and db.query(models.User).filter(models.User.email == payload.email).first():
-        raise HTTPException(status_code=400, detail="Email already registered")
-    for field in ("name", "email", "is_active"):
-        value = getattr(payload, field)
-        if value is not None:
-            setattr(user, field, value)
-    if payload.password:
-        user.hashed_password = auth.hash_password(payload.password)
-    user.role = next_role
-    user.organization_id = next_org
-    user.manager_id = next_manager
-    record(db, current_user, "user.updated", "user", user.id, {"role": user.role.value, "organization_id": user.organization_id, "manager_id": user.manager_id})
+
+    role_changing = payload.role is not None and payload.role != user.role
+    new_role = payload.role if payload.role is not None else user.role
+
+    if role_changing:
+        if user_id == acting_user.id:
+            raise HTTPException(status_code=403, detail="You cannot change your own role")
+        allowed = auth.CREATABLE_ROLES.get(acting_user.role, set())
+        if payload.role not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"A {acting_user.role.value} cannot assign the {payload.role.value} role",
+            )
+
+    required_parent_role = models.ROLE_HIERARCHY[new_role]
+    requested_parent_id = payload.parent_id
+    if required_parent_role is not None:
+        if role_changing or requested_parent_id is not None:
+            if requested_parent_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"parent_id is required when role is '{new_role.value}'.",
+                )
+            parent = _validate_parent(db, acting_user, new_role, requested_parent_id)
+            user.parent_id = parent.id if parent else None
+    else:
+        user.parent_id = None
+
+    if payload.role is not None:
+        user.role = payload.role
+
+    if payload.name is not None:
+        user.name = payload.name
+
+    if payload.is_active is not None:
+        if user_id == acting_user.id:
+            raise HTTPException(status_code=403, detail="You cannot deactivate your own account")
+        user.is_active = payload.is_active
+
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.delete("/{user_id}", response_model=schemas.UserOut)
+def deactivate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.require_can_manage_users),
+):
+    """Soft-delete only (is_active = False). A hard delete would break the
+    existing FK from TimeEntry/Screenshot rows, and would silently orphan
+    any users this person created — deactivating preserves history and
+    keeps their subtree intact under its existing parent relationship."""
+    if user_id == current_user.id:
+        raise HTTPException(status_code=403, detail="You cannot deactivate your own account")
+    if not auth.can_manage(db, current_user, user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.is_active = False
     db.commit()
     db.refresh(user)
     return user

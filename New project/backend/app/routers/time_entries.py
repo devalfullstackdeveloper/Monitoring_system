@@ -33,6 +33,8 @@ def start_tracking(
         project_id=payload.project_id,
         start_ip_address=payload.ip_address,
         status=models.TimeEntryStatus.active,
+        last_seen_at=datetime.now(timezone.utc),
+        is_idle=False,
     )
     db.add(entry)
     db.commit()
@@ -99,7 +101,16 @@ def list_time_entries(
         visible_ids = [user.id for user in auth.visible_user_filter(db.query(models.User), current_user).all()]
         query = query.filter(models.TimeEntry.user_id.in_(visible_ids))
     else:
-        query = query.filter(models.TimeEntry.user_id == current_user.id)
+        visible_ids = auth.get_visible_member_ids(db, current_user)
+
+    if user_id is not None and current_user.role != models.UserRole.superadmin:
+        if not auth.can_manage(db, current_user, user_id):
+            raise HTTPException(status_code=404, detail="User not found")
+
+    if visible_ids is not None:
+        query = query.filter(models.TimeEntry.user_id.in_(visible_ids))
+    if user_id is not None:
+        query = query.filter(models.TimeEntry.user_id == user_id)
 
     if start_date is not None:
         range_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)

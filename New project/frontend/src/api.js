@@ -105,42 +105,11 @@ export async function updateSettings(payload) {
   return handle(resp);
 }
 
-export function screenshotUrl(filePath) {
-  // Backend storage can be configured as a local path or Docker's /data path.
-  const normalized = (filePath || "").replace(/\\/g, "/");
-  const markers = ["storage/screenshots/", "data/screenshots/"];
-  const marker = markers.find((candidate) => normalized.includes(candidate));
-  const relative = marker
-    ? normalized.slice(normalized.lastIndexOf(marker) + marker.length)
-    : normalized.replace(/^\/+/, "");
-  return `${BACKEND_URL}/media/screenshots/${relative}`;
-}
-
-export async function listAlerts(status) {
-  const url = new URL(`${BACKEND_URL}/alerts`);
-  if (status) url.searchParams.set("status", status);
-  const resp = await fetch(url, { headers: authHeaders() });
-  return handle(resp);
-}
-
-export async function acknowledgeAlert(alertId) {
-  const resp = await fetch(`${BACKEND_URL}/alerts/${alertId}/acknowledge`, {
-    method: "POST",
-    headers: authHeaders(),
-  });
-  return handle(resp);
-}
-
-export async function listOrganizations() {
-  const resp = await fetch(`${BACKEND_URL}/organizations`, { headers: authHeaders() });
-  return handle(resp);
-}
-
-export async function createOrganization(name) {
-  const resp = await fetch(`${BACKEND_URL}/organizations`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ name }),
-  });
-  return handle(resp);
+export async function screenshotImageUrl(screenshotId) {
+  const resp = await fetch(`${BACKEND_URL}/screenshots/${screenshotId}/file`, { headers: authHeaders() });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed (${resp.status})`);
+  }
+  return URL.createObjectURL(await resp.blob());
 }

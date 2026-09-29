@@ -188,7 +188,7 @@ export default function TrackerSettings() {
 
   if (loading) return <div className="loading-state">Loading...</div>;
 
-  if (currentUser?.role !== "super_admin" && currentUser?.role !== "admin") {
+  if (!["superadmin", "admin"].includes(currentUser?.role)) {
     return (
       <div>
         <h1>Tracker Management</h1>

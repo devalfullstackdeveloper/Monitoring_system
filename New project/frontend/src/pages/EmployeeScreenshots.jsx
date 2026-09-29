@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { getUser, listScreenshots, screenshotUrl } from "../api";
+import { getUser, listScreenshots } from "../api";
+import useScreenshotImageUrls from "../hooks/useScreenshotImageUrls";
 
 function localDay(dateStr) {
   const d = new Date(dateStr);
@@ -43,8 +44,10 @@ const DENSITY_END_HOUR = 20; // inclusive
 const DENSITY_TICK_HOURS = [8, 10, 12, 16, 20];
 
 export default function EmployeeScreenshots() {
-  const { id } = useParams();
+  const { id, role } = useParams();
   const userId = Number(id);
+  const memberRoleNames = { admins: "Admins", managers: "Managers", "team-leads": "Team Leads", users: "Users" };
+  const detailPath = role ? `/members/${role}/${userId}` : `/employee/${userId}`;
 
   const [user, setUser] = useState(null);
   const [shots, setShots] = useState([]);
@@ -76,6 +79,7 @@ export default function EmployeeScreenshots() {
                .sort((a, b) => new Date(a.captured_at) - new Date(b.captured_at)),
     [shots, dateFilter]
   );
+  const imageUrls = useScreenshotImageUrls(dayShots);
 
   const groups = useMemo(() => {
     const byHour = new Map();
@@ -118,13 +122,23 @@ export default function EmployeeScreenshots() {
   return (
     <div>
       <nav className="page-header-bar page-breadcrumb" aria-label="Breadcrumb">
-        <Link to="/" className="breadcrumb-link">
-          Dashboard
-        </Link>
+        {role ? (
+          <>
+            <Link to="/members" className="breadcrumb-link">Members</Link>
+            <span className="breadcrumb-separator">›</span>
+            <Link to={`/members/${role}`} className="breadcrumb-link">{memberRoleNames[role] || "Members"}</Link>
+            <span className="breadcrumb-separator">›</span>
+            <Link to={detailPath} className="breadcrumb-link">{user?.name || "Member"}</Link>
+          </>
+        ) : (
+          <>
+            <Link to="/" className="breadcrumb-link">Dashboard</Link>
+            <span className="breadcrumb-separator">›</span>
+            <Link to={detailPath} className="breadcrumb-link">{user?.name || "Employee"}</Link>
+          </>
+        )}
         <span className="breadcrumb-separator">›</span>
-        <Link to={`/employee/${userId}`} className="breadcrumb-link">EmployeeDetail</Link>
-        <span className="breadcrumb-separator">›</span>
-        <span className="breadcrumb-current">EmployeeScreenshots</span>
+        <span className="breadcrumb-current">Screenshots</span>
       </nav>
 
       <div className="shots-header-row">
@@ -201,7 +215,7 @@ export default function EmployeeScreenshots() {
                     <span className={`shot-dot ${activityDotClass(s.activity_level || 0)}`} />
                     <span className="shot-card-time">{timeLabel(s.captured_at)}</span>
                   </div>
-                  <img className="shot-card-thumb" src={screenshotUrl(s.file_path)} alt={`Screenshot at ${s.captured_at}`} />
+                  <img className="shot-card-thumb" src={imageUrls[s.id] || undefined} alt={`Screenshot at ${s.captured_at}`} />
                 </button>
               ))}
             </div>
@@ -216,7 +230,7 @@ export default function EmployeeScreenshots() {
             {selectedIndex > 0 && (
               <button className="lightbox-nav lightbox-nav-prev" onClick={(e) => { e.stopPropagation(); setSelectedIndex((i) => i - 1); }}>‹</button>
             )}
-            <img src={screenshotUrl(selectedShot.file_path)} alt={`Screenshot ${selectedShot.id}`} />
+            <img src={imageUrls[selectedShot.id] || undefined} alt={`Screenshot ${selectedShot.id}`} />
             {selectedIndex < dayShots.length - 1 && (
               <button className="lightbox-nav lightbox-nav-next" onClick={(e) => { e.stopPropagation(); setSelectedIndex((i) => i + 1); }}>›</button>
             )}

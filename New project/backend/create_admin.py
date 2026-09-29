@@ -1,5 +1,6 @@
 """
-One-off script to create the first admin user.
+One-off script to create the first Super Admin user — the root of the
+role hierarchy (Super Admin -> Admin -> Manager -> TL -> User).
 Run with:  python create_admin.py
 """
 from getpass import getpass
@@ -14,23 +15,24 @@ models.Base.metadata.create_all(bind=engine)
 
 def main():
     db = SessionLocal()
-    name = input("Admin name: ").strip()
-    email = input("Admin email: ").strip()
-    password = getpass("Admin password: ")
+    name = input("Super Admin name: ").strip()
+    email = input("Super Admin email: ").strip()
+    password = getpass("Super Admin password: ")
 
     if db.query(models.User).filter(models.User.email == email).first():
         print("A user with that email already exists.")
         return
 
-    admin = models.User(
+    superadmin = models.User(
         name=name,
         email=email,
         hashed_password=hash_password(password),
-        role=models.UserRole.super_admin,
+        role=models.UserRole.superadmin,
+        parent_id=None,
     )
-    db.add(admin)
+    db.add(superadmin)
     db.commit()
-    print(f"Admin user '{email}' created.")
+    print(f"Super Admin user '{email}' created.")
 
 
 if __name__ == "__main__":

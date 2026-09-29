@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
-import { getUser, listTimeEntries, listScreenshots } from "../api";
+import { getCurrentUser, getUser, listTimeEntries, listScreenshots } from "../api";
 
 function localDay(dateStr) {
   const d = new Date(dateStr);
@@ -62,9 +62,9 @@ function formatTimeRange(entry) {
 }
 
 export default function EmployeeDetail() {
-  const { id } = useParams();
+  const { id, role } = useParams();
   const navigate = useNavigate();
-  const userId = Number(id);
+  const [userId, setUserId] = useState(id === "me" ? null : Number(id));
 
   const [user, setUser] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -74,25 +74,24 @@ export default function EmployeeDetail() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let mounted = true;
-    const load = () => {
-      setLoading(true);
-      Promise.all([getUser(userId), listTimeEntries(userId), listScreenshots(userId)])
-        .then(([u, e, s]) => {
-          if (!mounted) return;
-          setUser(u);
-          setEntries(e);
-          setScreenshots(s);
-        })
-        .finally(() => mounted && setLoading(false));
-    };
-    load();
-    const interval = setInterval(load, 10000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
-  }, [userId]);
+    setLoading(true);
+    const userRequest = id === "me" ? getCurrentUser() : getUser(Number(id));
+    userRequest
+      .then((currentUser) => {
+        setUserId(currentUser.id);
+        return Promise.all([
+          Promise.resolve(currentUser),
+          listTimeEntries(currentUser.id),
+          listScreenshots(currentUser.id),
+        ]);
+      })
+      .then(([u, e, s]) => {
+        setUser(u);
+        setEntries(e);
+        setScreenshots(s);
+      })
+      .finally(() => setLoading(false));
+  }, [id]);
 
   const [, refreshClock] = useState(0);
   useEffect(() => {
@@ -113,15 +112,44 @@ export default function EmployeeDetail() {
     0
   );
 
-  // Idle Time = gaps between the first "start" and last "end" (or now) where the tracker wasn't running
+  const dayBuckets = useMemo(() => {
+    const anchor = new Date(`${dateFilter}T00:00:00`);
+    const now = new Date();
+    const isToday = dateFilter === todayStr();
+    const currentHour = isToday ? now.getHours() : 23;
+    const bucketCount = isToday ? currentHour + 1 : 24;
+
+    return Array.from({ length: bucketCount }, (_, h) => {
+      const rangeStart = new Date(anchor);
+      rangeStart.setHours(h, 0, 0, 0);
+
+      const rangeEnd = new Date(anchor);
+      rangeEnd.setHours(h + 1, 0, 0, 0);
+
+      const effectiveEnd = isToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
+      const activeSeconds = dayEntries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
+      const bucketSeconds = Math.max(0, Math.floor((effectiveEnd.getTime() - rangeStart.getTime()) / 1000));
+
+      return {
+        label: `${String(h).padStart(2, "0")}:00`,
+        activeSeconds,
+        idleSeconds: Math.max(0, bucketSeconds - activeSeconds),
+      };
+    });
+  }, [dateFilter, dayEntries]);
+
+  const workSeconds = dayBuckets.reduce((sum, bucket) => sum + bucket.activeSeconds, 0);
   const idleSeconds = useMemo(() => {
     if (dayEntries.length === 0) return 0;
-    const firstStart = Math.max(new Date(dayEntries[0].start_time).getTime(), selectedDay.start.getTime());
-    const lastEntry = dayEntries[dayEntries.length - 1];
-    const lastEnd = Math.min(effectiveEnd(lastEntry).getTime(), selectedDay.end.getTime());
-    const totalSpan = Math.max(0, Math.floor((lastEnd - firstStart) / 1000));
-    return Math.max(totalSpan - workSeconds, 0);
-  }, [dayEntries, selectedDay, workSeconds]);
+
+    const trackingStart = new Date(dayEntries[0].start_time);
+    const latestEnd = dayEntries.reduce((latest, entry) => {
+      const end = effectiveEnd(entry);
+      return end > latest ? end : latest;
+    }, trackingStart);
+    const trackedSeconds = Math.max(0, Math.floor((latestEnd.getTime() - trackingStart.getTime()) / 1000));
+    return Math.max(0, trackedSeconds - workSeconds);
+  }, [dayEntries, workSeconds]);
 
   const avgActivity = dayShots.length
     ? Math.round(dayShots.reduce((sum, s) => sum + (s.activity_level || 0), 0) / dayShots.length)
@@ -133,11 +161,14 @@ export default function EmployeeDetail() {
     const now = new Date();
     const isToday = dateFilter === todayStr();
     const currentHour = isToday ? now.getHours() : 23;
+    const chartEntries = granularity === "daily" ? dayEntries : entries;
 
     const buildBucket = (rangeStart, rangeEnd, label) => {
-      const effectiveEnd = isToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
-      const workSeconds = entries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
-      return { label, seconds: workSeconds };
+      const bucketIsToday = toLocalDateKey(rangeStart) === todayStr();
+      const effectiveEnd = bucketIsToday && rangeEnd.getTime() > now.getTime() ? now : rangeEnd;
+      const activeSeconds = chartEntries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, effectiveEnd), 0);
+      const bucketSeconds = Math.max(0, Math.floor((effectiveEnd.getTime() - rangeStart.getTime()) / 1000));
+      return { label, seconds: Math.min(activeSeconds, bucketSeconds) };
     };
 
     if (granularity === "daily") {
@@ -168,7 +199,7 @@ export default function EmployeeDetail() {
       const seconds = entries.reduce((sum, e) => sum + overlapSeconds(e, rangeStart, rangeEnd), 0);
       return { label: String(i + 1), seconds };
     });
-  }, [entries, dateFilter, granularity]);
+  }, [dayEntries, dateFilter, entries, granularity]);
 
   const maxBucketSeconds = Math.max(...buckets.map((b) => b.seconds), 60);
   const scaleMaxSeconds = Math.max(Math.ceil(maxBucketSeconds / 900) * 900, 3600);
@@ -183,6 +214,8 @@ export default function EmployeeDetail() {
 
   const liveStatus = activeEntry ? (activeEntry.is_idle ? "idle" : "active") : "offline";
   const liveStatusLabel = liveStatus === "active" ? "Live Syncing" : liveStatus === "idle" ? "Idle" : "Offline";
+  const memberRoleNames = { admins: "Admins", managers: "Managers", "team-leads": "Team Leads", users: "Users" };
+  const roleBasePath = role ? `/members/${role}/${id}` : `/employee/${id}`;
 
   if (loading) return <div className="loading-state">Loading...</div>;
   if (!user) return <div className="loading-state">Employee not found.</div>;
@@ -191,11 +224,21 @@ export default function EmployeeDetail() {
     <div>
       <div className="page-header-bar">
         <nav className="page-breadcrumb" aria-label="Breadcrumb">
-          <Link to="/" className="breadcrumb-link">
-            Dashboard
-          </Link>
-          <span className="breadcrumb-separator">›</span>
-          <span className="breadcrumb-current">EmployeeDetail</span>
+          {role ? (
+            <>
+              <Link to="/members" className="breadcrumb-link">Members</Link>
+              <span className="breadcrumb-separator">›</span>
+              <Link to={`/members/${role}`} className="breadcrumb-link">{memberRoleNames[role] || "Members"}</Link>
+              <span className="breadcrumb-separator">›</span>
+              <span className="breadcrumb-current">{user.name}</span>
+            </>
+          ) : (
+            <>
+              <Link to="/" className="breadcrumb-link">Dashboard</Link>
+              <span className="breadcrumb-separator">›</span>
+              <span className="breadcrumb-current">{user.name}</span>
+            </>
+          )}
         </nav>
         <span className={`pill pill-${liveStatus}`}>
           <span className="pill-dot" /> {liveStatusLabel}
@@ -209,7 +252,7 @@ export default function EmployeeDetail() {
         <div className="card profile-card">
           <div className="avatar-circle">{user.name.charAt(0).toUpperCase()}</div>
           <h3>{user.name}</h3>
-          <p className="muted">{user.role === "admin" ? "Administrator" : "Employee"}</p>
+          <p className="muted">{{ superadmin: "Super Administrator", admin: "Administrator", manager: "Manager", tl: "Team Lead", user: "Employee" }[user.role] || user.role}</p>
           <div className="profile-row"><span>Email</span><span>{user.email}</span></div>
           <div className="profile-row">
             <span>Status</span>
@@ -252,7 +295,7 @@ export default function EmployeeDetail() {
           <button
             type="button"
             className="metric-card metric-card-btn"
-            onClick={() => navigate(`/employee/${userId}/screenshots`)}
+            onClick={() => navigate(`${roleBasePath}/screenshots`)}
             title="View all screenshots for this employee"
           >
             <div className="metric-card-top">

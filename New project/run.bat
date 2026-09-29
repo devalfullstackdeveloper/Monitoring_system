@@ -37,11 +37,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ZgB1AG4AYwB0AG
 if not errorlevel 1 set "TRACKER_ALREADY_RUNNING=1"
 
 if "%TRACKER_ALREADY_RUNNING%"=="1" (
-    REM Ask the existing agent to start a new session without duplicating it.
+    REM Stop the existing tracker before starting a fresh instance.
+    echo Org Tracker is already running - stopping it before restart...
+    call "%~dp0stop-all.bat" >nul 2>nul
+    timeout /t 2 >nul 2>nul
+
     if not exist "%APPDATA%\OrgTracker" mkdir "%APPDATA%\OrgTracker" >nul 2>nul
     type nul > "%APPDATA%\OrgTracker\start_tracking.request"
     call "%~dp0start-all-background.bat"
-    echo Org Tracker is already running. A new tracking session was requested.
+    echo Org Tracker was restarted with your latest changes.
     echo.
     exit /b 0
 )

@@ -2,76 +2,98 @@ $ErrorActionPreference = "SilentlyContinue"
 
 $root = (Resolve-Path $PSScriptRoot).Path.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
 
-function Read-Url($url) {
-    try {
-        return (Invoke-WebRequest -Uri $url -TimeoutSec 2 -ErrorAction Stop).Content
-    } catch {
-        return ""
-    }
-}
+Write-Host "Stopping Org Tracker (backend, frontend, desktop agent)..."
+Write-Host "Project root: $root"
+Write-Host ""
 
-function Get-ListenerPidsForPort($port) {
-    $found = @()
-
-    if ($IsWindows) {
-        try {
-            $results = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction Stop
-            foreach ($item in $results) {
-                if ($null -ne $item.OwningProcess -and $item.OwningProcess -gt 0) {
-                    $found += [int]$item.OwningProcess
-                }
-            }
-            return @($found | Sort-Object -Unique)
-        } catch {
-            return @()
+function Get-TrackerProcessIds {
+    $found = New-Object System.Collections.Generic.List[int]
+    $all = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+    foreach ($p in $all) {
+        $cmd = $p.CommandLine
+        if (-not $cmd) { continue }
+        $isFrontend = ($cmd -like "*$root\frontend*") -and (($cmd -like "*run dev*") -or ($cmd -like "*vite*") -or ($cmd -like "*npm*"))
+        $isAgent    = ($cmd -like "*$root\desktop-agent*") -and ($cmd -like "*agent.py*")
+        if ($isFrontend -or $isAgent) {
+            $found.Add([int]$p.ProcessId)
         }
     }
-
-    $lsof = Get-Command lsof -ErrorAction SilentlyContinue
-    if ($lsof) {
-        $lsofOutput = & $lsof.Path -nP -iTCP:$port -sTCP:LISTEN -t 2>$null
-        foreach ($pidText in $lsofOutput) {
-            if ($pidText -match '^\d+$') {
-                $found += [int]$pidText
-            }
-        }
-    }
-
-    if (-not $found) {
-        $ss = Get-Command ss -ErrorAction SilentlyContinue
-        if ($ss) {
-            $ssOutput = & $ss.Path -lntp "sport = :$port" 2>$null
-            foreach ($line in $ssOutput) {
-                if ($line -match 'pid=(\d+)') {
-                    $found += [int]$Matches[1]
-                }
-            }
-        }
-    }
-
     return @($found | Sort-Object -Unique)
 }
 
-function Stop-PortIfTracker($port, $url, $contentPattern) {
-    $content = Read-Url $url
-    if ($content -notlike $contentPattern) {
+function Get-AncestorChain([int]$procId) {
+    $chain = New-Object System.Collections.Generic.List[int]
+    $current = $procId
+    $depth = 0
+    while ($current -and $current -gt 4 -and $depth -lt 10) {
+        $chain.Add($current)
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $current" -ErrorAction SilentlyContinue
+        if (-not $proc) { break }
+        $current = $proc.ParentProcessId
+        $depth++
+    }
+    return @($chain)
+}
+
+function Stop-Pid([int]$procId) {
+    $result = & taskkill.exe /F /T /PID $procId 2>&1
+    Write-Host "taskkill PID $procId : $result"
+}
+
+function Get-ListenerPidsForPort([int]$port) {
+    $found = New-Object System.Collections.Generic.List[int]
+    $lines = & netstat.exe -ano | Select-String ":$port\s"
+    foreach ($line in $lines) {
+        if ($line.ToString() -match "LISTENING\s+(\d+)\s*$") {
+            $found.Add([int]$Matches[1])
+        }
+    }
+    return @($found | Sort-Object -Unique)
+}
+
+function Stop-PortCompletely([int]$port) {
+    $pids = Get-ListenerPidsForPort $port
+    if ($pids.Count -eq 0) {
+        Write-Host "Port $port : nothing listening."
         return
     }
-
-    foreach ($pid in Get-ListenerPidsForPort $port) {
-        if ($pid -gt 0) {
-            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    foreach ($procId in $pids) {
+        $chain = Get-AncestorChain $procId
+        Write-Host "Port $port owned by PID $procId, ancestor chain: $($chain -join ' -> ')"
+        foreach ($ancestorId in $chain) {
+            Stop-Pid $ancestorId
         }
     }
 }
 
-Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.Path -and
-    $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -and
-    $_.ProcessName -match '^python'
-} | ForEach-Object {
-    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+$targets = Get-TrackerProcessIds
+if ($targets.Count -eq 0) {
+    Write-Host "No matching frontend/agent processes found by command line."
+} else {
+    Write-Host "Found $($targets.Count) matching process(es): $($targets -join ', ')"
+    foreach ($procId in $targets) {
+        Stop-Pid $procId
+    }
 }
 
-Stop-PortIfTracker 8000 "http://127.0.0.1:8000/health" '*"status":"ok"*'
-Stop-PortIfTracker 5173 "http://127.0.0.1:5173/" "*<title>Org Tracker</title>*"
+Start-Sleep -Milliseconds 800
+
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    Stop-PortCompletely 8000
+    Stop-PortCompletely 5173
+    Start-Sleep -Milliseconds 700
+}
+
+Write-Host ""
+Write-Host "Final check:"
+foreach ($port in 8000, 5173) {
+    $pids = Get-ListenerPidsForPort $port
+    if ($pids.Count -gt 0) {
+        Write-Host "  Port $port : STILL LISTENING (PID $($pids -join ', '))"
+    } else {
+        Write-Host "  Port $port : clear."
+    }
+}
+
+Write-Host ""
+Write-Host "Done."
