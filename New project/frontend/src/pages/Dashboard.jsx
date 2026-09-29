@@ -71,11 +71,16 @@ export default function Dashboard() {
   const [updateMember, setUpdateMember] = useState({ id: "", name: "", role: "user", parent_id: "" });
   const [updateError, setUpdateError] = useState("");
 
-  async function loadAll() {
+  async function loadAll(viewer = currentUser) {
     setLoading(true);
-    const u = await listUsers();
+    if (!viewer) return;
+    const isEmployee = viewer.role === "employee";
+    const u = isEmployee ? [viewer] : await listUsers();
     setUsers(u);
-    const [e, s] = await Promise.all([listTimeEntries(), listScreenshots()]);
+    const [e, s] = await Promise.all([
+      listTimeEntries(isEmployee ? viewer.id : undefined),
+      listScreenshots(isEmployee ? viewer.id : undefined),
+    ]);
     setEntries(e);
     setScreenshots(s);
     setLoading(false);
@@ -279,6 +284,7 @@ export default function Dashboard() {
                 <td>{timeAgo(r.lastActiveAt)}</td>
                 <td>
                   <button className="btn-view" onClick={() => navigate(`/employee/${r.user.id}`)}>View</button>
+                  {(currentUser?.role === "super_admin" || currentUser?.role === "admin" || currentUser?.role === "manager") && <button className="btn-view" onClick={() => { setAddError(""); setEditingUser({ ...r.user }); }}>Edit</button>}
                 </td>
               </tr>
             ))}
@@ -316,6 +322,8 @@ export default function Dashboard() {
                   <option key={user.id} value={user.id}>{user.name} ({user.email})</option>
                 ))}
               </select>
+              {organizations.length > 0 && <><label>Organization</label><select value={newMember.organization_id || ""} onChange={(e) => setNewMember({ ...newMember, organization_id: e.target.value ? Number(e.target.value) : null })}><option value="">Use my organization</option>{organizations.map((organization) => <option key={organization.id} value={organization.id}>{organization.name}</option>)}</select></>}
+              {newMember.role === "employee" && <><label>Manager</label><select value={newMember.manager_id || ""} onChange={(e) => setNewMember({ ...newMember, manager_id: e.target.value ? Number(e.target.value) : null })}><option value="">No manager assigned</option>{users.filter((user) => user.role === "manager" && (!newMember.organization_id || user.organization_id === newMember.organization_id)).map((manager) => <option key={manager.id} value={manager.id}>{manager.name}</option>)}</select></>}
               <div className="modal-actions">
                 <button type="button" className="btn-secondary" onClick={() => setShowAddModal(false)}>Cancel</button>
                 <button type="submit" className="btn-primary" disabled={saving}>{saving ? "Adding..." : "Add Member"}</button>

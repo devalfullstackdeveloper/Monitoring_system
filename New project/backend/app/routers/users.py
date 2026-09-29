@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas, auth
 from ..database import get_db
+from ..audit import record
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -89,6 +90,7 @@ def create_user(
     )
     db.add(user)
     db.commit()
+    record(db, current_user, "user.created", "user", details={"email": user.email, "role": user.role.value})
     db.refresh(user)
     return user
 
@@ -106,6 +108,31 @@ def get_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+def _validate_assignment(db, actor, role, organization_id, manager_id, target=None):
+    if role == models.UserRole.super_admin:
+        if organization_id is not None or manager_id is not None:
+            raise HTTPException(status_code=400, detail="Super admins cannot belong to an organization or manager")
+        if actor.role != models.UserRole.super_admin:
+            raise HTTPException(status_code=403, detail="Only a super admin can assign super admins")
+        return
+    if organization_id is None:
+        raise HTTPException(status_code=400, detail="Organization is required")
+    if not db.query(models.Organization).filter(models.Organization.id == organization_id).first():
+        raise HTTPException(status_code=400, detail="Organization not found")
+    if actor.role == models.UserRole.admin and organization_id != actor.organization_id:
+        raise HTTPException(status_code=403, detail="Admins can only manage their organization")
+    if actor.role == models.UserRole.manager and organization_id != actor.organization_id:
+        raise HTTPException(status_code=403, detail="Managers can only manage their organization")
+    if manager_id is not None:
+        if target is not None and manager_id == target.id:
+            raise HTTPException(status_code=400, detail="A user cannot manage themselves")
+        manager = db.query(models.User).filter(models.User.id == manager_id).first()
+        if not manager or manager.role != models.UserRole.manager or manager.organization_id != organization_id:
+            raise HTTPException(status_code=400, detail="Manager must belong to the selected organization")
+        if actor.role == models.UserRole.manager and manager.id != actor.id:
+            raise HTTPException(status_code=403, detail="Managers can only assign their own team")
 
 
 @router.patch("/{user_id}", response_model=schemas.UserOut)
